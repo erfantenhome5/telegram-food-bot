@@ -2,3 +2,5 @@ python-telegram-bot
 httpx
 python-dotenv
 telethon
+cryptography
+sentry-sdk
