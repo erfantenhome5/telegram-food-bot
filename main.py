@@ -47,7 +47,10 @@ logging.basicConfig(
 LOGGER = logging.getLogger(__name__)
 
 # --- Environment Loading ---
-load_dotenv()
+# Explicitly load the .env file from the script's directory
+env_path = Path('.') / '.env'
+load_dotenv(dotenv_path=env_path)
+
 API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -59,7 +62,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", OPENROUTER_API_KEY)
 
 
 if not all([API_ID, API_HASH, BOT_TOKEN, ENCRYPTION_KEY, ADMIN_USER_ID]):
-    raise ValueError("Missing required environment variables. Ensure API_ID, API_HASH, BOT_TOKEN, ENCRYPTION_KEY, and ADMIN_USER_ID are set.")
+    raise ValueError("Missing required environment variables. Ensure API_ID, API_HASH, BOT_TOKEN, ENCRYPTION_KEY, and ADMIN_USER_ID are set in your .env file.")
 
 API_ID = int(API_ID)
 ADMIN_USER_ID = int(ADMIN_USER_ID)
@@ -298,6 +301,7 @@ class GroupCreatorBot:
         if edit: await event.edit(message, buttons=buttons)
         else: await event.respond(message, buttons=buttons)
 
+    @events.register(events.CallbackQuery)
     async def callback_query_handler(self, event):
         user_id = event.sender_id
         state = self.user_states.get(user_id)
