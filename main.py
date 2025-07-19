@@ -37,6 +37,19 @@ LOGGER = logging.getLogger(__name__)
 user_states = {}
 user_data = {}
 
+# --- Button Texts (Persian) ---
+BTN_MANAGE_ACCOUNTS = "👤 مدیریت حساب‌ها"
+BTN_JOIN_LINK = "🔗 عضویت با لینک"
+BTN_EXPORT_LINKS = "📤 صدور لینک‌های گروه"
+BTN_START_MANUAL_CONV = "💬 شروع مکالمه دستی"
+BTN_STOP_MANUAL_CONV = "⏹️ توقف مکالمه دستی"
+BTN_SET_AI_KEYWORDS = "📝 تنظیم کلمات کلیدی AI"
+BTN_SET_CONV_ACCOUNTS = "🗣️ تنظیم حساب‌های گفتگو"
+BTN_ADD_ACCOUNT = "➕ افزودن حساب جدید"
+BTN_BACK = "⬅️ بازگشت"
+BTN_RESERVE_FOOD = "🍔 رزرو غذا"
+
+
 # --- Website Interaction Class ---
 class FoodReservationSystem:
     """
@@ -193,36 +206,60 @@ async def get_ai_recommendation(day_data: Dict[str, Any]) -> str:
 # --- Bot Client Setup ---
 bot = TelegramClient('bot_session', int(API_ID), API_HASH)
 
+# --- Menu Functions ---
+async def send_main_menu(event):
+    """Sends the main menu with reply keyboard."""
+    buttons = [
+        [Button.text(BTN_RESERVE_FOOD)],
+        [Button.text(BTN_MANAGE_ACCOUNTS), Button.text(BTN_JOIN_LINK)],
+        [Button.text(BTN_EXPORT_LINKS)],
+        [Button.text(BTN_START_MANUAL_CONV), Button.text(BTN_STOP_MANUAL_CONV)],
+        [Button.text(BTN_SET_AI_KEYWORDS), Button.text(BTN_SET_CONV_ACCOUNTS)],
+    ]
+    await event.respond("منوی اصلی:", buttons=buttons)
+
 # --- Bot Handlers ---
 @bot.on(events.NewMessage(pattern='/start'))
 async def start_handler(event):
-    """Starts the conversation and asks for username."""
+    """Starts the conversation and shows the main menu."""
     user_id = event.sender_id
-    user_states[user_id] = 'awaiting_username'
-    await event.respond(
-        "🤖 سلام! به ربات رزرو غذای دانشگاه خوش آمدید.\n\n"
-        "برای شروع، لطفاً نام کاربری (شماره دانشجویی) خود را وارد کنید:",
-        buttons=None
-    )
+    user_states[user_id] = 'main_menu'
+    await event.respond("🤖 به ربات رزرو غذا خوش آمدید!")
+    await send_main_menu(event)
 
 @bot.on(events.NewMessage(pattern='/cancel'))
 async def cancel_handler(event):
-    """Cancels the current operation."""
+    """Cancels the current operation and returns to main menu."""
     user_id = event.sender_id
-    if user_id in user_states:
-        del user_states[user_id]
-    if user_id in user_data:
-        del user_data[user_id]
-    await event.respond("عملیات لغو شد. برای شروع مجدد /start را بزنید.", buttons=None)
+    user_states[user_id] = 'main_menu'
+    await event.respond("عملیات لغو شد.")
+    await send_main_menu(event)
 
 @bot.on(events.NewMessage)
 async def message_handler(event):
-    """Handles incoming messages based on user state."""
+    """Handles incoming messages based on user state and button presses."""
     user_id = event.sender_id
     state = user_states.get(user_id)
+    text = event.text
 
+    # --- Main Menu Button Handlers ---
+    if state == 'main_menu':
+        if text == BTN_RESERVE_FOOD:
+            user_states[user_id] = 'awaiting_username'
+            await event.respond("برای شروع رزرو، لطفاً نام کاربری (شماره دانشجویی) خود را وارد کنید:", buttons=None)
+        elif text == BTN_MANAGE_ACCOUNTS:
+            await event.respond("این ویژگی (مدیریت حساب‌ها) هنوز پیاده‌سازی نشده است.")
+        elif text == BTN_JOIN_LINK:
+            await event.respond("این ویژگی (عضویت با لینک) هنوز پیاده‌سازی نشده است.")
+        # ... Add handlers for other main menu buttons here
+        else:
+            # Fallback for unexpected text
+            await send_main_menu(event)
+        return
+
+    # --- Conversation Flow Handlers ---
     if state == 'awaiting_username':
-        user_data[user_id] = {'username': event.text}
+        user_data[user_id] = {'username': text}
         user_states[user_id] = 'awaiting_password'
         await event.respond("🔒 لطفاً رمز عبور خود را وارد کنید:")
     
@@ -237,10 +274,10 @@ async def handle_login(event):
 
     if not username:
         await event.respond("خطایی رخ داده است. لطفاً با /start مجدداً شروع کنید.")
-        if user_id in user_states: del user_states[user_id]
+        user_states[user_id] = 'main_menu'
         return
 
-    await event.respond("⏳ در حال ورود به سامانه... لطفاً کمی صبر کنید.")
+    msg = await event.respond("⏳ در حال ورود به سامانه... لطفاً کمی صبر کنید.")
     
     reservation_system = FoodReservationSystem()
     user_data[user_id]['reservation_system'] = reservation_system
@@ -251,14 +288,17 @@ async def handle_login(event):
         reservation_data = await reservation_system.get_reservation_data()
         if reservation_data:
             user_data[user_id]['reservation_data'] = reservation_data
+            await msg.delete()
             await show_days_menu(event)
             user_states[user_id] = 'choosing_day'
         else:
-            await event.respond("❌ ورود موفق بود اما دریافت اطلاعات رزرو با مشکل مواجه شد.")
-            if user_id in user_states: del user_states[user_id]
+            await msg.edit("❌ ورود موفق بود اما دریافت اطلاعات رزرو با مشکل مواجه شد.")
+            user_states[user_id] = 'main_menu'
+            await send_main_menu(event)
     else:
-        await event.respond("❌ نام کاربری یا رمز عبور اشتباه است. لطفاً با /start دوباره تلاش کنید.")
-        if user_id in user_states: del user_states[user_id]
+        await msg.edit("❌ نام کاربری یا رمز عبور اشتباه است.")
+        user_states[user_id] = 'main_menu'
+        await send_main_menu(event)
 
 async def show_days_menu(event, edit=False):
     """Displays the available days for reservation."""
@@ -267,7 +307,7 @@ async def show_days_menu(event, edit=False):
     
     if not reservation_data:
         await event.respond("اطلاعات رزرو یافت نشد. لطفاً دوباره وارد شوید.")
-        if user_id in user_states: del user_states[user_id]
+        user_states[user_id] = 'main_menu'
         return
 
     keyboard = []
@@ -277,6 +317,7 @@ async def show_days_menu(event, edit=False):
             callback_data = f'day_{day.get("DayDate")}'
             keyboard.append([Button.inline(day_title, data=callback_data.encode())])
     
+    keyboard.append([Button.inline("بازگشت به منوی اصلی", data=b"back_to_main")])
     message = "📅 لطفاً روز مورد نظر خود را برای رزرو انتخاب کنید:" if keyboard else "در حال حاضر روز فعالی برای رزرو وجود ندارد."
     
     if edit:
@@ -290,6 +331,12 @@ async def callback_query_handler(event):
     user_id = event.sender_id
     state = user_states.get(user_id)
     data = event.data.decode('utf-8')
+
+    if data == "back_to_main":
+        user_states[user_id] = 'main_menu'
+        await event.delete()
+        await send_main_menu(event)
+        return
 
     if state == 'choosing_day' and data.startswith('day_'):
         await handle_day_selection(event)
@@ -335,7 +382,7 @@ async def handle_reservation_action(event):
         return
 
     if action == "ai_suggest":
-        await event.edit("🧠 در حال مشورت با هوش مصنوعی... لطفاً صبر کنید.")
+        await event.edit("🧠 در حال مشورت با هوش مصنوعی... لطفاً صبر کنید.", buttons=await event.get_buttons())
         day_data = user_data[user_id].get('selected_day_data')
         recommendation = await get_ai_recommendation(day_data)
         
