@@ -1,6 +1,7 @@
 import logging
 import os
 import json
+import random
 from typing import Dict, Any, Tuple, List, Optional
 import httpx
 from telethon import TelegramClient, events, Button
@@ -36,17 +37,22 @@ LOGGER = logging.getLogger(__name__)
 user_states = {}
 user_data = {}
 
-# --- Website Interaction Class (No changes needed here) ---
+# --- Website Interaction Class ---
 class FoodReservationSystem:
     """
     Handles all web interactions with the food.gums.ac.ir website.
     """
     BASE_URL = "https://food.gums.ac.ir"
+    USER_AGENTS = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    ]
 
     def __init__(self):
         self.client = httpx.AsyncClient(
             headers={
-                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+                "User-Agent": random.choice(self.USER_AGENTS),
                 "Accept": "application/json, text/plain, */*",
                 "Accept-Language": "en-US,en;q=0.5",
                 "X-Requested-With": "XMLHttpRequest",
