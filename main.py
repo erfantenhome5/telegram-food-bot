@@ -3,16 +3,8 @@ import os
 import json
 from typing import Dict, Any, Tuple, List, Optional
 import httpx
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    ContextTypes,
-    ConversationHandler,
-    MessageHandler,
-    CallbackQueryHandler,
-    filters,
-)
+from telethon import TelegramClient, events, Button
+from telethon.sessions import StringSession
 from dotenv import load_dotenv
 
 # --- Load Environment Variables ---
@@ -20,10 +12,14 @@ from dotenv import load_dotenv
 # Example .env file:
 # TELEGRAM_BOT_TOKEN="12345:your_telegram_bot_token"
 # GEMINI_API_KEY="your_gemini_api_key"
+# API_ID="your_api_id"
+# API_HASH="your_api_hash"
 load_dotenv()
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+API_ID = os.getenv("API_ID")
+API_HASH = os.getenv("API_HASH")
 
 # --- Basic Logging Setup ---
 logging.basicConfig(
@@ -36,16 +32,11 @@ logging.basicConfig(
 )
 LOGGER = logging.getLogger(__name__)
 
-# --- Conversation States ---
-(
-    AWAITING_USERNAME,
-    AWAITING_PASSWORD,
-    MENU,
-    CHOOSING_DAY,
-    RESERVATION_ACTION,
-) = range(5)
+# --- State and Data Storage (In-memory) ---
+user_states = {}
+user_data = {}
 
-# --- Website Interaction Class ---
+# --- Website Interaction Class (No changes needed here) ---
 class FoodReservationSystem:
     """
     Handles all web interactions with the food.gums.ac.ir website.
@@ -74,7 +65,6 @@ class FoodReservationSystem:
             login_url = f"{self.BASE_URL}/identity/login"
             response = await self.client.get(login_url)
             response.raise_for_status()
-            # Extract the xsrf token from cookies
             if 'idsrv.xsrf' in response.cookies:
                 self.xsrf_token = response.cookies['idsrv.xsrf']
                 LOGGER.info("Successfully retrieved XSRF token.")
@@ -104,9 +94,6 @@ class FoodReservationSystem:
                 headers={"Content-Type": "application/x-www-form-urlencoded"}
             )
             response.raise_for_status()
-
-            # Successful login usually results in a redirect.
-            # httpx handles redirects automatically, so we check the final URL.
             if "/identity/login" not in str(response.url):
                 LOGGER.info(f"Login successful for user {username}.")
                 return True
@@ -144,8 +131,6 @@ class FoodReservationSystem:
             )
             response.raise_for_status()
             response_data = response.json()
-            
-            # Check the response for success message
             if response_data and isinstance(response_data, list) and response_data[0].get("StateMessage") == "با موفقیت ثبت شد":
                 msg = response_data[0].get("StateMessage", "رزرو با موفقیت انجام شد.")
                 LOGGER.info(f"Reservation successful: {msg}")
@@ -160,9 +145,7 @@ class FoodReservationSystem:
 
 # --- AI Helper ---
 async def get_ai_recommendation(day_data: Dict[str, Any]) -> str:
-    """
-    Gets a meal recommendation from the Gemini API.
-    """
+    """Gets a meal recommendation from the Gemini API."""
     if not GEMINI_API_KEY:
         return "متاسفانه کلید API هوش مصنوعی تنظیم نشده است."
 
@@ -192,7 +175,6 @@ async def get_ai_recommendation(day_data: Dict[str, Any]) -> str:
             response = await client.post(api_url, json=payload, headers={'Content-Type': 'application/json'})
             response.raise_for_status()
             result = response.json()
-            
             if (candidates := result.get("candidates")) and candidates[0].get("content", {}).get("parts", [{}])[0].get("text"):
                 return candidates[0]["content"]["parts"][0]["text"]
             else:
@@ -202,225 +184,204 @@ async def get_ai_recommendation(day_data: Dict[str, Any]) -> str:
         LOGGER.error(f"Error calling Gemini API: {e}")
         return "متاسفانه در ارتباط با هوش مصنوعی خطایی رخ داد."
 
+# --- Bot Client Setup ---
+bot = TelegramClient('bot_session', int(API_ID), API_HASH)
 
 # --- Bot Handlers ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+@bot.on(events.NewMessage(pattern='/start'))
+async def start_handler(event):
     """Starts the conversation and asks for username."""
-    await update.message.reply_text(
+    user_id = event.sender_id
+    user_states[user_id] = 'awaiting_username'
+    await event.respond(
         "🤖 سلام! به ربات رزرو غذای دانشگاه خوش آمدید.\n\n"
         "برای شروع، لطفاً نام کاربری (شماره دانشجویی) خود را وارد کنید:",
-        reply_markup=ReplyKeyboardRemove(),
+        buttons=None
     )
-    return AWAITING_USERNAME
 
-async def get_username(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Stores username and asks for password."""
-    context.user_data['username'] = update.message.text
-    await update.message.reply_text("🔒 لطفاً رمز عبور خود را وارد کنید:")
-    return AWAITING_PASSWORD
+@bot.on(events.NewMessage(pattern='/cancel'))
+async def cancel_handler(event):
+    """Cancels the current operation."""
+    user_id = event.sender_id
+    if user_id in user_states:
+        del user_states[user_id]
+    if user_id in user_data:
+        del user_data[user_id]
+    await event.respond("عملیات لغو شد. برای شروع مجدد /start را بزنید.", buttons=None)
 
-async def get_password_and_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Stores password, attempts login, and shows the main menu."""
-    password = update.message.text
-    username = context.user_data.get('username')
+@bot.on(events.NewMessage)
+async def message_handler(event):
+    """Handles incoming messages based on user state."""
+    user_id = event.sender_id
+    state = user_states.get(user_id)
+
+    if state == 'awaiting_username':
+        user_data[user_id] = {'username': event.text}
+        user_states[user_id] = 'awaiting_password'
+        await event.respond("🔒 لطفاً رمز عبور خود را وارد کنید:")
     
+    elif state == 'awaiting_password':
+        await handle_login(event)
+
+async def handle_login(event):
+    """Handles the login process."""
+    user_id = event.sender_id
+    password = event.text
+    username = user_data.get(user_id, {}).get('username')
+
     if not username:
-        await update.message.reply_text("خطایی رخ داده است. لطفاً با /start مجدداً شروع کنید.")
-        return ConversationHandler.END
+        await event.respond("خطایی رخ داده است. لطفاً با /start مجدداً شروع کنید.")
+        if user_id in user_states: del user_states[user_id]
+        return
 
-    await update.message.reply_text("⏳ در حال ورود به سامانه... لطفاً کمی صبر کنید.")
-
-    # Initialize a new reservation system instance for the user's session
+    await event.respond("⏳ در حال ورود به سامانه... لطفاً کمی صبر کنید.")
+    
     reservation_system = FoodReservationSystem()
-    context.user_data['reservation_system'] = reservation_system
+    user_data[user_id]['reservation_system'] = reservation_system
     
     login_successful = await reservation_system.login(username, password)
 
     if login_successful:
         reservation_data = await reservation_system.get_reservation_data()
         if reservation_data:
-            context.user_data['reservation_data'] = reservation_data
-            await show_days_menu(update, context)
-            return CHOOSING_DAY
+            user_data[user_id]['reservation_data'] = reservation_data
+            await show_days_menu(event)
+            user_states[user_id] = 'choosing_day'
         else:
-            await update.message.reply_text("❌ ورود موفق بود اما دریافت اطلاعات رزرو با مشکل مواجه شد. لطفاً بعداً دوباره تلاش کنید.")
-            return ConversationHandler.END
+            await event.respond("❌ ورود موفق بود اما دریافت اطلاعات رزرو با مشکل مواجه شد.")
+            if user_id in user_states: del user_states[user_id]
     else:
-        await update.message.reply_text(
-            "❌ نام کاربری یا رمز عبور اشتباه است. لطفاً با /start دوباره تلاش کنید."
-        )
-        return ConversationHandler.END
+        await event.respond("❌ نام کاربری یا رمز عبور اشتباه است. لطفاً با /start دوباره تلاش کنید.")
+        if user_id in user_states: del user_states[user_id]
 
-async def show_days_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def show_days_menu(event, edit=False):
     """Displays the available days for reservation."""
-    reservation_data = context.user_data.get('reservation_data')
+    user_id = event.sender_id
+    reservation_data = user_data.get(user_id, {}).get('reservation_data')
+    
     if not reservation_data:
-        await update.callback_query.message.reply_text("اطلاعات رزرو یافت نشد. لطفاً دوباره وارد شوید.")
-        return ConversationHandler.END
+        await event.respond("اطلاعات رزرو یافت نشد. لطفاً دوباره وارد شوید.")
+        if user_id in user_states: del user_states[user_id]
+        return
 
     keyboard = []
     for day in reservation_data:
-        # We only show days that are active for reservation
         if day.get("DayState") == 0:
             day_title = f'{day.get("DayTitle", "")} - {day.get("DayDate", "")}'
             callback_data = f'day_{day.get("DayDate")}'
-            keyboard.append([InlineKeyboardButton(day_title, callback_data=callback_data)])
+            keyboard.append([Button.inline(day_title, data=callback_data.encode())])
     
-    if not keyboard:
-         message = "در حال حاضر روز فعالی برای رزرو وجود ندارد."
-    else:
-        message = "📅 لطفاً روز مورد نظر خود را برای رزرو انتخاب کنید:"
-
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    message = "📅 لطفاً روز مورد نظر خود را برای رزرو انتخاب کنید:" if keyboard else "در حال حاضر روز فعالی برای رزرو وجود ندارد."
     
-    if update.callback_query:
-        await update.callback_query.message.edit_text(message, reply_markup=reply_markup)
+    if edit:
+        await event.edit(message, buttons=keyboard)
     else:
-        await update.message.reply_text(message, reply_markup=reply_markup)
+        await event.respond(message, buttons=keyboard)
 
+@bot.on(events.CallbackQuery)
+async def callback_query_handler(event):
+    """Handles all inline button presses."""
+    user_id = event.sender_id
+    state = user_states.get(user_id)
+    data = event.data.decode('utf-8')
 
-async def day_selection_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if state == 'choosing_day' and data.startswith('day_'):
+        await handle_day_selection(event)
+    elif state == 'reservation_action':
+        await handle_reservation_action(event)
+
+async def handle_day_selection(event):
     """Handles user's day selection and shows meal options."""
-    query = update.callback_query
-    await query.answer()
+    user_id = event.sender_id
+    selected_date = event.data.decode('utf-8').split('_')[1]
+    user_data[user_id]['selected_date'] = selected_date
     
-    selected_date = query.data.split('_')[1]
-    context.user_data['selected_date'] = selected_date
-    
-    reservation_data = context.user_data.get('reservation_data')
-    day_data = next((day for day in reservation_data if day.get("DayDate") == selected_date), None)
+    reservation_data = user_data[user_id].get('reservation_data')
+    day_data = next((d for d in reservation_data if d.get("DayDate") == selected_date), None)
     
     if not day_data:
-        await query.edit_message_text("خطا: روز انتخاب شده یافت نشد.")
-        return CHOOSING_DAY
+        await event.edit("خطا: روز انتخاب شده یافت نشد.")
+        return
 
-    context.user_data['selected_day_data'] = day_data
+    user_data[user_id]['selected_day_data'] = day_data
     keyboard = []
     
     for meal in day_data.get("Meals", []):
-        # Only show meals that have a food menu and are active
         if meal.get("FoodMenu") and meal.get("MealState") == 0:
             meal_name = meal.get("MealName")
             callback_data = f'meal_{meal.get("MealId")}'
-            keyboard.append([InlineKeyboardButton(f"رزرو {meal_name}", callback_data=callback_data)])
+            keyboard.append([Button.inline(f"رزرو {meal_name}", data=callback_data.encode())])
 
-    # Add the AI suggestion button
-    keyboard.append([InlineKeyboardButton("🤖 اجازه بده هوش مصنوعی امروز برایت تصمیم بگیرد", callback_data="ai_suggest")])
-    keyboard.append([InlineKeyboardButton("⬅️ بازگشت به انتخاب روز", callback_data="back_to_days")])
+    keyboard.append([Button.inline("🤖 اجازه بده هوش مصنوعی امروز برایت تصمیم بگیرد", data=b"ai_suggest")])
+    keyboard.append([Button.inline("⬅️ بازگشت به انتخاب روز", data=b"back_to_days")])
     
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await query.edit_message_text(f'شما روز {selected_date} را انتخاب کردید. چه کاری می‌خواهید انجام دهید؟', reply_markup=reply_markup)
-    
-    return RESERVATION_ACTION
+    await event.edit(f'شما روز {selected_date} را انتخاب کردید. چه کاری می‌خواهید انجام دهید؟', buttons=keyboard)
+    user_states[user_id] = 'reservation_action'
 
-
-async def reservation_action_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handles the user's action for a specific day (reserve meal or ask AI)."""
-    query = update.callback_query
-    await query.answer()
-    
-    action = query.data
+async def handle_reservation_action(event):
+    """Handles the user's action for a specific day."""
+    user_id = event.sender_id
+    action = event.data.decode('utf-8')
 
     if action == "back_to_days":
-        await show_days_menu(update, context)
-        return CHOOSING_DAY
+        user_states[user_id] = 'choosing_day'
+        await show_days_menu(event, edit=True)
+        return
 
     if action == "ai_suggest":
-        await query.edit_message_text("🧠 در حال مشورت با هوش مصنوعی... لطفاً صبر کنید.")
-        day_data = context.user_data.get('selected_day_data')
+        await event.edit("🧠 در حال مشورت با هوش مصنوعی... لطفاً صبر کنید.")
+        day_data = user_data[user_id].get('selected_day_data')
         recommendation = await get_ai_recommendation(day_data)
         
-        # After showing the recommendation, show the menu again
-        keyboard = query.message.reply_markup.inline_keyboard
-        await query.edit_message_text(f"💡 **پیشنهاد هوش مصنوعی:**\n\n{recommendation}", reply_markup=InlineKeyboardMarkup(keyboard))
-        return RESERVATION_ACTION # Stay in the same state
+        current_buttons = await event.get_buttons()
+        await event.edit(f"💡 **پیشنهاد هوش مصنوعی:**\n\n{recommendation}", buttons=current_buttons)
+        return
 
     if action.startswith("meal_"):
         selected_meal_id = int(action.split('_')[1])
-        day_data = context.user_data.get('selected_day_data')
-        
+        day_data = user_data[user_id].get('selected_day_data')
         meal_data = next((m for m in day_data.get("Meals", []) if m.get("MealId") == selected_meal_id), None)
         
         if not meal_data or not meal_data.get("FoodMenu"):
-            await query.edit_message_text("خطا: این وعده غذایی در دسترس نیست.")
-            return RESERVATION_ACTION
-            
-        # For simplicity, we reserve the first available food item in the menu.
-        # A more complex bot could show a food selection menu here.
+            await event.edit("خطا: این وعده غذایی در دسترس نیست.")
+            return
+
         food_to_reserve = meal_data["FoodMenu"][0]
         self_to_reserve = food_to_reserve["SelfMenu"][0]
 
-        # Construct the payload based on HAR file analysis
         reservation_payload = [{
-            "Row": 0, # This can be a placeholder
-            "Id": meal_data["Id"],
-            "Date": day_data["DayDate"],
-            "MealId": meal_data["MealId"],
-            "FoodId": food_to_reserve["FoodId"],
-            "FoodName": food_to_reserve["FoodName"],
-            "SelfId": self_to_reserve["SelfId"],
-            "LastCounts": 0,
-            "Counts": 1,
-            "Price": self_to_reserve.get("Price", 0),
-            "SobsidPrice": self_to_reserve.get("Yarane", 0),
-            "PriceType": 2, # Assuming type 2 from HAR
-            "State": 0,
-            "Type": 1,
-            "OP": 1,
-            "OpCategory": 1,
-            "Provider": 1,
-            "Saved": 0,
-            "MealName": meal_data["MealName"],
-            "DayName": day_data["DayTitle"],
-            "SelfName": self_to_reserve["SelfName"],
-            "DayIndex": day_data["DayId"],
-            "MealIndex": meal_data["MealId"] -1 # Adjusting index
+            "Row": 0, "Id": meal_data["Id"], "Date": day_data["DayDate"],
+            "MealId": meal_data["MealId"], "FoodId": food_to_reserve["FoodId"],
+            "FoodName": food_to_reserve["FoodName"], "SelfId": self_to_reserve["SelfId"],
+            "LastCounts": 0, "Counts": 1, "Price": self_to_reserve.get("Price", 0),
+            "SobsidPrice": self_to_reserve.get("Yarane", 0), "PriceType": 2, "State": 0,
+            "Type": 1, "OP": 1, "OpCategory": 1, "Provider": 1, "Saved": 0,
+            "MealName": meal_data["MealName"], "DayName": day_data["DayTitle"],
+            "SelfName": self_to_reserve["SelfName"], "DayIndex": day_data["DayId"],
+            "MealIndex": meal_data["MealId"] - 1
         }]
 
-        await query.edit_message_text("در حال ثبت رزرو شما...")
+        await event.edit("در حال ثبت رزرو شما...")
         
-        reservation_system = context.user_data['reservation_system']
+        reservation_system = user_data[user_id]['reservation_system']
         success, message = await reservation_system.make_reservation(reservation_payload)
 
         final_message = f"✅ **نتیجه رزرو:**\n{message}" if success else f"❌ **نتیجه رزرو:**\n{message}"
         
-        keyboard = [[InlineKeyboardButton("⬅️ بازگشت به انتخاب روز", callback_data="back_to_days")]]
-        await query.edit_message_text(final_message, reply_markup=InlineKeyboardMarkup(keyboard))
-        return CHOOSING_DAY
+        keyboard = [[Button.inline("⬅️ بازگشت به انتخاب روز", data=b"back_to_days")]]
+        await event.edit(final_message, buttons=keyboard)
+        user_states[user_id] = 'reservation_action'
 
 
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Cancels and ends the conversation."""
-    await update.message.reply_text(
-        "عملیات لغو شد. برای شروع مجدد /start را بزنید.", reply_markup=ReplyKeyboardRemove()
-    )
-    return ConversationHandler.END
-
-
-def main() -> None:
-    """Run the bot."""
-    if not TELEGRAM_BOT_TOKEN or not GEMINI_API_KEY:
-        LOGGER.critical("FATAL: TELEGRAM_BOT_TOKEN or GEMINI_API_KEY is not set in the environment.")
+async def main():
+    """Start the bot."""
+    if not all([TELEGRAM_BOT_TOKEN, GEMINI_API_KEY, API_ID, API_HASH]):
+        LOGGER.critical("FATAL: Missing one or more required environment variables.")
         return
-
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-
-    conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
-        states={
-            AWAITING_USERNAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_username)],
-            AWAITING_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_password_and_login)],
-            CHOOSING_DAY: [CallbackQueryHandler(day_selection_handler, pattern="^day_")],
-            RESERVATION_ACTION: [CallbackQueryHandler(reservation_action_handler)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-    )
-
-    application.add_handler(conv_handler)
-
-    LOGGER.info("Bot is starting...")
-    application.run_polling()
-
+        
+    await bot.start(bot_token=TELEGRAM_BOT_TOKEN)
+    LOGGER.info("Bot is running...")
+    await bot.run_until_disconnected()
 
 if __name__ == "__main__":
-    main()
+    bot.loop.run_until_complete(main())
