@@ -669,9 +669,9 @@ class EnhancedFoodReservationBot:
 async def main() -> None:
     """
     DEBUGGED: Main function to set up and run the bot.
-    Using the application context manager (`async with`) is the most robust way
-    to ensure `initialize()` and `shutdown()` are called and awaited correctly,
-    preventing event loop errors, especially when run as a service.
+    `application.run_polling()` is a coroutine that handles the entire
+    application lifecycle (initialization, polling, shutdown). This avoids 
+    manual lifecycle management and potential event loop conflicts.
     """
     bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
     if not bot_token:
@@ -684,9 +684,8 @@ async def main() -> None:
     logger.info("Starting Enhanced Food Reservation Bot (AI disabled for debugging)...")
     
     # This will run the bot until a stop signal is received (e.g., Ctrl+C).
-    # The context manager ensures graceful startup and shutdown.
-    async with application:
-        await application.start_polling(allowed_updates=Update.ALL_TYPES)
+    # It manages the entire application lifecycle, including our cleanup hook.
+    await application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == '__main__':
