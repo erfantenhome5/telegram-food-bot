@@ -1,388 +1,1068 @@
-import asyncio
-import hashlib
-import json
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Enhanced Telegram Food Reservation Bot with Review System and Multi-Model AI Fallback
+A bot that helps users login to their food reservation account,
+view available reservations, make reservations with AI assistance,
+and leave reviews for food items.
+
+AI Fallback Sequence: Gemini 2.5 Pro → Gemini 2.5 Flash → Gemini 2.0 Flash → Gemini 1.5 Flash
+"""
+
 import logging
+import asyncio
+import json
 import os
-import random
-import re
-import shutil
-import traceback
-import uuid
-from collections import deque
-from datetime import datetime, timedelta
-from pathlib import Path
-from typing import Any, Dict, List, Optional
 import sys
-import time
-
-import httpx
-import sentry_sdk
-from cryptography.fernet import Fernet, InvalidToken
-from dotenv import load_dotenv
-from sentry_sdk.integrations.logging import LoggingIntegration
-from sentry_sdk.types import Event, Hint
-from telethon import Button, TelegramClient, errors, events, types, sessions
-from telethon.extensions import markdown
-from telethon.tl.functions.channels import (CreateChannelRequest, GetParticipantRequest,
-                                            InviteToChannelRequest, LeaveChannelRequest)
-from telethon.tl.functions.messages import (ExportChatInviteRequest,
-                                            GetAllStickersRequest,
-                                            GetStickerSetRequest,
-                                            ImportChatInviteRequest,
-                                            SendReactionRequest,
-                                            SearchStickerSetsRequest)
-from telethon.tl.types import (ChannelParticipantCreator, ChannelParticipantsAdmins,
-                               InputStickerSetID, InputStickerSetShortName, Message,
-                               PeerChannel, ReactionEmoji)
-
-# --- Basic Logging Setup ---
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler("bot_activity.log"),
-        logging.StreamHandler()
-    ]
+import sqlite3
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Any
+import aiohttp
+from telegram import (
+    Update, 
+    InlineKeyboardButton, 
+    InlineKeyboardMarkup,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove
 )
-LOGGER = logging.getLogger(__name__)
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+    MessageHandler,
+    ConversationHandler,
+    ContextTypes,
+    filters
+)
 
-# --- Environment Loading ---
-# Explicitly load the .env file from the script's directory
-env_path = Path('.') / '.env'
-load_dotenv(dotenv_path=env_path)
+# Configure logging
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
-API_ID = os.getenv("API_ID")
-API_HASH = os.getenv("API_HASH")
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY")
-SENTRY_DSN = os.getenv("SENTRY_DSN")
-ADMIN_USER_ID = os.getenv("ADMIN_USER_ID")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", OPENROUTER_API_KEY)
+# Conversation states
+LOGIN_USERNAME, LOGIN_PASSWORD, RESERVATION_SELECTION, AI_HELP, REVIEW_RATING, REVIEW_COMMENT = range(6)
 
+# Persian text constants
+PERSIAN_TEXT = {
+    'welcome': '🍽️ به ربات رزرو غذا خوش آمدید!\n\nلطفاً یکی از گزینه‌های زیر را انتخاب کنید:',
+    'login_prompt': '🔐 لطفاً نام کاربری خود را وارد کنید:',
+    'password_prompt': '🔑 لطفاً رمز عبور خود را وارد کنید:',
+    'login_success': '✅ ورود موفقیت‌آمیز بود!',
+    'login_failed': '❌ ورود ناموفق! لطفاً نام کاربری و رمز عبور را بررسی کنید.',
+    'reservations_title': '📋 رزروهای موجود:',
+    'no_reservations': '❌ هیچ رزروی موجود نیست.',
+    'select_reservation': '👆 لطفاً رزرو مورد نظر خود را انتخاب کنید:',
+    'reservation_success': '✅ رزرو با موفقیت انجام شد!\n\n💭 آیا می‌خواهید نظر خود را درباره این غذا ثبت کنید؟',
+    'reservation_failed': '❌ رزرو ناموفق بود. لطفاً دوباره تلاش کنید.',
+    'ai_help_prompt': '🤖 هوش مصنوعی در حال بررسی گزینه‌های غذایی شما است...',
+    'ai_recommendation': '🎯 توصیه هوش مصنوعی:',
+    'cancel': '❌ لغو',
+    'back': '🔙 بازگشت',
+    'login': '🔐 ورود',
+    'view_reservations': '📋 مشاهده رزروها',
+    'ai_help': '🤖 کمک هوش مصنوعی',
+    'my_reviews': '📝 نظرات من',
+    'logout': '🚪 خروج',
+    'help': '❓ راهنما',
+    'error': '❌ خطایی رخ داد. لطفاً دوباره تلاش کنید.',
+    'session_expired': '⏰ جلسه شما منقضی شده است. لطفاً دوباره وارد شوید.',
+    'processing': '⏳ در حال پردازش...',
+    'choose_date': '📅 تاریخ مورد نظر را انتخاب کنید:',
+    'food_details': '🍽️ جزئیات غذا:',
+    'confirm_reservation': '✅ تأیید رزرو',
+    'cancel_reservation': '❌ لغو رزرو',
+    'leave_review': '📝 ثبت نظر',
+    'skip_review': '⏭️ رد کردن',
+    'rating_prompt': '⭐ لطفاً امتیاز خود را از ۱ تا ۵ انتخاب کنید:',
+    'comment_prompt': '💭 لطفاً نظر خود را درباره این غذا بنویسید:\n(برای رد کردن /skip تایپ کنید)',
+    'review_saved': '✅ نظر شما با موفقیت ثبت شد! از شما متشکریم.',
+    'view_reviews': '👀 مشاهده نظرات',
+    'no_reviews': '📝 هنوز نظری ثبت نشده است.',
+    'reviews_title': '📋 نظرات کاربران:',
+    'your_reviews_title': '📝 نظرات شما:',
+    'average_rating': '⭐ میانگین امتیاز:',
+    'total_reviews': '📊 تعداد نظرات:',
+    'review_by': '👤 نظر از:',
+    'rating': '⭐ امتیاز:',
+    'comment': '💭 نظر:',
+    'date': '📅 تاریخ:'
+}
 
-if not all([API_ID, API_HASH, BOT_TOKEN, ENCRYPTION_KEY, ADMIN_USER_ID]):
-    raise ValueError("Missing required environment variables. Ensure API_ID, API_HASH, BOT_TOKEN, ENCRYPTION_KEY, and ADMIN_USER_ID are set in your .env file.")
-
-API_ID = int(API_ID)
-ADMIN_USER_ID = int(ADMIN_USER_ID)
-
-SESSIONS_DIR = Path(os.getenv("SESSIONS_DIR", "sessions"))
-SESSIONS_DIR.mkdir(exist_ok=True, parents=True)
-
-# --- Custom Markdown for Spoilers ---
-class CustomMarkdown:
-    @staticmethod
-    def parse(text):
-        text, entities = markdown.parse(text)
-        for i, e in enumerate(entities):
-            if isinstance(e, types.MessageEntityTextUrl):
-                if e.url == 'spoiler':
-                    entities[i] = types.MessageEntitySpoiler(e.offset, e.length)
-                elif e.url.startswith('emoji/'):
-                    entities[i] = types.MessageEntityCustomEmoji(e.offset, e.length, int(e.url.split('/')[1]))
-        return text, entities
-
-    @staticmethod
-    def unparse(text, entities):
-        for i, e in enumerate(entities or []):
-            if isinstance(e, types.MessageEntityCustomEmoji):
-                entities[i] = types.MessageEntityTextUrl(e.offset, e.length, f'emoji/{e.document_id}')
-            if isinstance(e, types.MessageEntitySpoiler):
-                entities[i] = types.MessageEntityTextUrl(e.offset, e.length, 'spoiler')
-        return markdown.unparse(text, entities)
-
-# --- Website Interaction Class ---
-class FoodReservationSystem:
-    BASE_URL = "https://food.gums.ac.ir"
-    USER_AGENTS = [
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-    ]
-
-    def __init__(self):
-        self.client = httpx.AsyncClient(
-            headers={"User-Agent": random.choice(self.USER_AGENTS)},
-            timeout=20.0, follow_redirects=True
-        )
-        self.xsrf_token = None
-
-    async def _get_xsrf_token(self) -> bool:
-        try:
-            response = await self.client.get(f"{self.BASE_URL}/identity/login")
-            response.raise_for_status()
-            if 'idsrv.xsrf' in response.cookies:
-                self.xsrf_token = response.cookies['idsrv.xsrf']
-                return True
-            return False
-        except httpx.RequestError as e:
-            LOGGER.error(f"XSRF token fetch error: {e}")
-            raise ConnectionError("Could not connect to the food service to get a security token.")
-
-    async def login(self, username, password) -> bool:
-        if not await self._get_xsrf_token():
-            return False
-        payload = {"idsrv.xsrf": self.xsrf_token, "username": username, "password": password}
-        try:
-            response = await self.client.post(
-                f"{self.BASE_URL}/identity/login", data=payload,
-                headers={"Content-Type": "application/x-www-form-urlencoded"}
+class ReviewDatabase:
+    """Database manager for storing and retrieving reviews"""
+    
+    def __init__(self, db_path: str = "reviews.db"):
+        self.db_path = db_path
+        self.init_database()
+    
+    def init_database(self):
+        """Initialize the database with required tables"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # Create reviews table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS reviews (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                user_first_name TEXT NOT NULL,
+                food_id TEXT NOT NULL,
+                food_name TEXT NOT NULL,
+                rating INTEGER NOT NULL CHECK (rating >= 1 AND rating <= 5),
+                comment TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
-            response.raise_for_status()
-            return "/identity/login" not in str(response.url)
-        except httpx.RequestError as e:
-            LOGGER.error(f"Login network error for {username}: {e}")
-            raise ConnectionError("A network error occurred while trying to log in.")
-
-    async def get_reservation_data(self) -> Optional[List[Dict]]:
+        ''')
+        
+        # Create index for faster queries
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_food_id ON reviews(food_id)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_user_id ON reviews(user_id)')
+        
+        conn.commit()
+        conn.close()
+    
+    def add_review(self, user_id: int, user_first_name: str, food_id: str, 
+                   food_name: str, rating: int, comment: str = None) -> bool:
+        """Add a new review to the database"""
         try:
-            response = await self.client.get(f"{self.BASE_URL}/api/v0/Reservation?lastdate=&navigation=0")
-            response.raise_for_status()
-            return response.json()
-        except (httpx.RequestError, json.JSONDecodeError) as e:
-            LOGGER.error(f"Failed to get reservation data: {e}")
-            raise ConnectionError("Could not fetch reservation data from the server.")
-
-    async def make_reservation(self, payload: List[Dict]) -> Tuple[bool, str]:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                INSERT INTO reviews (user_id, user_first_name, food_id, food_name, rating, comment)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (user_id, user_first_name, food_id, food_name, rating, comment))
+            
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            logger.error(f"Error adding review: {e}")
+            return False
+    
+    def get_food_reviews(self, food_id: str) -> List[Dict]:
+        """Get all reviews for a specific food item"""
         try:
-            response = await self.client.post(f"{self.BASE_URL}/api/v0/Reservation", json=payload)
-            response.raise_for_status()
-            data = response.json()
-            if data and data[0].get("StateMessage") == "با موفقیت ثبت شد":
-                return True, data[0].get("StateMessage")
-            return False, data[0].get("StateMessage", "An unknown error occurred.")
-        except (httpx.RequestError, json.JSONDecodeError) as e:
-            LOGGER.error(f"Failed to make reservation: {e}")
-            raise ConnectionError("A network error occurred while making the reservation.")
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                SELECT user_first_name, rating, comment, created_at
+                FROM reviews
+                WHERE food_id = ?
+                ORDER BY created_at DESC
+            ''', (food_id,))
+            
+            reviews = []
+            for row in cursor.fetchall():
+                reviews.append({
+                    'user_first_name': row[0],
+                    'rating': row[1],
+                    'comment': row[2],
+                    'created_at': row[3]
+                })
+            
+            conn.close()
+            return reviews
+        except Exception as e:
+            logger.error(f"Error getting food reviews: {e}")
+            return []
+    
+    def get_user_reviews(self, user_id: int) -> List[Dict]:
+        """Get all reviews by a specific user"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                SELECT food_name, rating, comment, created_at
+                FROM reviews
+                WHERE user_id = ?
+                ORDER BY created_at DESC
+            ''', (user_id,))
+            
+            reviews = []
+            for row in cursor.fetchall():
+                reviews.append({
+                    'food_name': row[0],
+                    'rating': row[1],
+                    'comment': row[2],
+                    'created_at': row[3]
+                })
+            
+            conn.close()
+            return reviews
+        except Exception as e:
+            logger.error(f"Error getting user reviews: {e}")
+            return []
+    
+    def get_food_stats(self, food_id: str) -> Dict:
+        """Get statistics for a food item"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                SELECT AVG(rating), COUNT(*), MIN(rating), MAX(rating)
+                FROM reviews
+                WHERE food_id = ?
+            ''', (food_id,))
+            
+            result = cursor.fetchone()
+            conn.close()
+            
+            if result and result[0] is not None:
+                return {
+                    'average_rating': round(result[0], 1),
+                    'total_reviews': result[1],
+                    'min_rating': result[2],
+                    'max_rating': result[3]
+                }
+            else:
+                return {
+                    'average_rating': 0,
+                    'total_reviews': 0,
+                    'min_rating': 0,
+                    'max_rating': 0
+                }
+        except Exception as e:
+            logger.error(f"Error getting food stats: {e}")
+            return {'average_rating': 0, 'total_reviews': 0, 'min_rating': 0, 'max_rating': 0}
+    
+    def get_all_reviews_summary(self) -> List[Dict]:
+        """Get summary of all reviews for AI analysis"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                SELECT food_id, food_name, AVG(rating) as avg_rating, COUNT(*) as review_count,
+                       GROUP_CONCAT(comment, ' | ') as all_comments
+                FROM reviews
+                WHERE comment IS NOT NULL AND comment != ''
+                GROUP BY food_id, food_name
+                ORDER BY avg_rating DESC, review_count DESC
+            ''')
+            
+            summaries = []
+            for row in cursor.fetchall():
+                summaries.append({
+                    'food_id': row[0],
+                    'food_name': row[1],
+                    'average_rating': round(row[2], 1),
+                    'review_count': row[3],
+                    'comments': row[4] if row[4] else ''
+                })
+            
+            conn.close()
+            return summaries
+        except Exception as e:
+            logger.error(f"Error getting reviews summary: {e}")
+            return []
 
-# --- Centralized Configuration ---
-class Config:
-    BTN_RESERVE_FOOD = "🍔 رزرو غذا"
-    BTN_MANAGE_ACCOUNTS = "👤 مدیریت حساب‌ها"
-    BTN_JOIN_VIA_LINK = "🔗 عضویت با لینک"
-    BTN_EXPORT_LINKS = "📤 صدور لینک‌های گروه"
-    BTN_START_MANUAL_CONV = "💬 شروع مکالمه دستی"
-    BTN_STOP_MANUAL_CONV = "⏹️ توقف مکالمه دستی"
-    BTN_SET_AI_KEYWORDS = "📝 تنظیم کلمات کلیدی AI"
-    BTN_SET_CONV_ACCOUNTS = "🗣️ تنظیم حساب‌های گفتگو"
-    BTN_BACK_TO_MAIN = "⬅️ بازگشت به منوی اصلی"
-
-class GroupCreatorBot:
+class FoodReservationAPI:
+    """API client for food reservation system"""
+    
     def __init__(self):
-        self.bot = TelegramClient(StringSession(), API_ID, API_HASH)
-        self.user_states: Dict[int, str] = {}
-        self.user_data: Dict[int, Dict[str, Any]] = {}
-
-    def get_main_menu(self):
-        return self.bot.build_reply_markup([
-            [Button.text(Config.BTN_RESERVE_FOOD)],
-            [Button.text(Config.BTN_MANAGE_ACCOUNTS), Button.text(Config.BTN_JOIN_VIA_LINK)],
-            [Button.text(Config.BTN_EXPORT_LINKS)],
-            [Button.text(Config.BTN_START_MANUAL_CONV), Button.text(Config.BTN_STOP_MANUAL_CONV)],
-            [Button.text(Config.BTN_SET_AI_KEYWORDS), Button.text(Config.BTN_SET_CONV_ACCOUNTS)],
-        ])
-
-    async def get_ai_recommendation(self, day_data: Dict[str, Any]) -> str:
-        if not GEMINI_API_KEY: return "سرویس هوش مصنوعی پیکربندی نشده است."
-        meal_options = [f"{m['MealName']}: {', '.join(f['FoodName'] for f in m['FoodMenu'])}" for m in day_data.get("Meals", []) if m.get("FoodMenu")]
-        if not meal_options: return "غذایی برای پیشنهاد یافت نشد."
-        
-        prompt = f"شما یک مشاور غذایی خوش ذوق هستید. از بین این گزینه‌ها بهترین را پیشنهاد دهید و دلیل خود را به صورت دوستانه بگویید:\n\n{chr(10).join(meal_options)}"
-        api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={GEMINI_API_KEY}"
-        payload = {"contents": [{"parts": [{"text": prompt}]}]}
+        self.base_url = "https://food.gums.ac.ir"
+        self.session = None
+        self.cookies = {}
+        self.headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'application/json, text/plain, */*',
+            'Accept-Language': 'fa-IR,fa;q=0.9,en;q=0.8',
+            'Content-Type': 'application/json',
+            'X-Requested-With': 'XMLHttpRequest'
+        }
+    
+    async def create_session(self):
+        """Create aiohttp session"""
+        if not self.session:
+            self.session = aiohttp.ClientSession(
+                headers=self.headers,
+                timeout=aiohttp.ClientTimeout(total=30)
+            )
+    
+    async def close_session(self):
+        """Close aiohttp session"""
+        if self.session:
+            await self.session.close()
+            self.session = None
+    
+    async def login(self, username: str, password: str) -> bool:
+        """Login to the food reservation system"""
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.post(api_url, json=payload)
-                response.raise_for_status()
-                return response.json()["candidates"][0]["content"]["parts"][0]["text"]
+            await self.create_session()
+            
+            # First, get the login page to obtain any necessary tokens
+            async with self.session.get(f"{self.base_url}/login") as response:
+                if response.status == 200:
+                    # Update cookies from the response
+                    self.cookies.update({cookie.key: cookie.value for cookie in response.cookies})
+            
+            # Prepare login data
+            login_data = {
+                "username": username,
+                "password": password
+            }
+            
+            # Perform login
+            async with self.session.post(
+                f"{self.base_url}/api/auth/login",
+                json=login_data,
+                cookies=self.cookies
+            ) as response:
+                if response.status == 200:
+                    result = await response.json()
+                    if result.get('success', False):
+                        # Update cookies after successful login
+                        self.cookies.update({cookie.key: cookie.value for cookie in response.cookies})
+                        return True
+                return False
+                
         except Exception as e:
-            LOGGER.error(f"AI recommendation error: {e}")
-            return "خطا در ارتباط با سرویس هوش مصنوعی."
-
-    async def send_error_explanation(self, event, e: Exception):
-        user_id = event.sender_id
-        traceback_str = traceback.format_exc()
-        LOGGER.error(f"Error for user {user_id}: {traceback_str}")
-        
-        # AI Analysis
-        ai_analysis = await self.get_ai_error_analysis(traceback_str)
-
-        # User-friendly message
-        user_message = "❌ یک خطای پیش‌بینی نشده رخ داد. گزارش به ادمین ارسال شد."
-        if isinstance(e, ConnectionError):
-            user_message = f"🔌 خطای اتصال: {e}"
-        elif isinstance(e, errors.FloodWaitError):
-            user_message = f"⏳ تلگرام از ما خواسته {e.seconds} ثانیه صبر کنیم. لطفاً بعداً دوباره تلاش کنید."
-
-        await event.respond(user_message)
-        
-        # Admin report
-        admin_report = f"**🚨 Error for user `{user_id}`**\n\n**🤖 AI Analysis:**\n{ai_analysis}\n\n**Traceback:**\n```{traceback_str[:3500]}```"
-        await self.bot.send_message(ADMIN_USER_ID, admin_report)
-
-    async def get_ai_error_analysis(self, traceback_str: str) -> str:
-        if not GEMINI_API_KEY: return "AI analysis disabled."
-        prompt = f"Analyze this Python traceback and provide a concise, one-sentence explanation of the root cause and a suggested fix.\n\nTraceback:\n{traceback_str}"
-        api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={GEMINI_API_KEY}"
-        payload = {"contents": [{"parts": [{"text": prompt}]}]}
+            logger.error(f"Login error: {e}")
+            return False
+    
+    async def get_reservations(self) -> List[Dict]:
+        """Get available reservations"""
         try:
-            async with httpx.AsyncClient(timeout=20.0) as client:
-                response = await client.post(api_url, json=payload)
-                response.raise_for_status()
-                return response.json()["candidates"][0]["content"]["parts"][0]["text"]
+            if not self.session:
+                return []
+            
+            async with self.session.get(
+                f"{self.base_url}/api/reservations",
+                cookies=self.cookies
+            ) as response:
+                if response.status == 200:
+                    result = await response.json()
+                    return result.get('data', [])
+                return []
+                
         except Exception as e:
-            return f"AI analysis failed: {e}"
-
-    def register_handlers(self):
-        self.bot.add_event_handler(self.start_handler, events.NewMessage(pattern='/start'))
-        self.bot.add_event_handler(self.message_handler, events.NewMessage)
-        self.bot.add_event_handler(self.callback_query_handler, events.CallbackQuery)
-
-    async def start_handler(self, event):
-        self.user_states[event.sender_id] = 'main_menu'
-        await event.respond("🤖 به ربات جامع مدیریت و رزرو خوش آمدید!", buttons=self.get_main_menu())
-
-    async def message_handler(self, event):
-        user_id = event.sender_id
-        state = self.user_states.get(user_id)
-        text = event.text
-
-        if text == Config.BTN_BACK_TO_MAIN:
-            self.user_states[user_id] = 'main_menu'
-            await event.respond("به منوی اصلی بازگشتید.", buttons=self.get_main_menu())
-            return
-
-        if state == 'main_menu':
-            if text == Config.BTN_RESERVE_FOOD:
-                self.user_states[user_id] = 'awaiting_username'
-                await event.respond("لطفاً نام کاربری خود را وارد کنید:", buttons=None)
-            else:
-                await event.respond("این ویژگی در حال توسعه است.")
-        elif state == 'awaiting_username':
-            self.user_data.setdefault(user_id, {})['username'] = text
-            self.user_states[user_id] = 'awaiting_password'
-            await event.respond("🔒 لطفاً رمز عبور خود را وارد کنید:")
-        elif state == 'awaiting_password':
-            await self.handle_login(event)
-
-    async def handle_login(self, event):
-        user_id = event.sender_id
-        msg = await event.respond("⏳ در حال ورود به سامانه...")
+            logger.error(f"Get reservations error: {e}")
+            return []
+    
+    async def make_reservation(self, reservation_id: str) -> bool:
+        """Make a reservation"""
         try:
-            system = FoodReservationSystem()
-            self.user_data[user_id]['system'] = system
-            login_ok = await system.login(self.user_data[user_id]['username'], event.text)
-            if login_ok:
-                res_data = await system.get_reservation_data()
-                if res_data:
-                    self.user_data[user_id]['reservation_data'] = res_data
-                    await msg.delete()
-                    await self.show_days_menu(event)
-                    self.user_states[user_id] = 'choosing_day'
+            if not self.session:
+                return False
+            
+            reservation_data = {
+                "reservation_id": reservation_id
+            }
+            
+            async with self.session.post(
+                f"{self.base_url}/api/reservations/create",
+                json=reservation_data,
+                cookies=self.cookies
+            ) as response:
+                if response.status == 200:
+                    result = await response.json()
+                    return result.get('success', False)
+                return False
+                
+        except Exception as e:
+            logger.error(f"Make reservation error: {e}")
+            return False
+    
+    async def cancel_reservation(self, reservation_id: str) -> bool:
+        """Cancel a reservation"""
+        try:
+            if not self.session:
+                return False
+            
+            async with self.session.delete(
+                f"{self.base_url}/api/reservations/{reservation_id}",
+                cookies=self.cookies
+            ) as response:
+                if response.status == 200:
+                    result = await response.json()
+                    return result.get('success', False)
+                return False
+                
+        except Exception as e:
+            logger.error(f"Cancel reservation error: {e}")
+            return False
+
+class MultiModelGeminiAI:
+    """Enhanced Gemini AI integration with multi-model fallback sequence"""
+    
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+        # AI Model URLs in fallback order: 2.5 Pro → 2.5 Flash → 2.0 Flash → 1.5 Flash
+        self.model_urls = [
+            {
+                'name': 'Gemini 2.5 Pro',
+                'url': 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent'
+            },
+            {
+                'name': 'Gemini 2.5 Flash',
+                'url': 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent'
+            },
+            {
+                'name': 'Gemini 2.0 Flash',
+                'url': 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent'
+            },
+            {
+                'name': 'Gemini 1.5 Flash',
+                'url': 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent'
+            }
+        ]
+    
+    async def get_food_recommendation(self, food_options: List[Dict], review_db: ReviewDatabase) -> str:
+        """Get AI recommendation for food selection using reviews data with multi-model fallback"""
+        try:
+            # Get review summaries for context
+            review_summaries = review_db.get_all_reviews_summary()
+            
+            # Create enhanced prompt with reviews data
+            food_descriptions = []
+            for option in food_options:
+                food_id = option.get('id', '')
+                food_name = option.get('name', 'نامشخص')
+                
+                desc = f"- {food_name}"
+                if option.get('description'):
+                    desc += f": {option['description']}"
+                if option.get('calories'):
+                    desc += f" (کالری: {option['calories']})"
+                if option.get('price'):
+                    desc += f" (قیمت: {option['price']} تومان)"
+                
+                # Add review data if available
+                stats = review_db.get_food_stats(food_id)
+                if stats['total_reviews'] > 0:
+                    desc += f" (امتیاز: {stats['average_rating']}/5 از {stats['total_reviews']} نظر)"
+                    
+                    # Add recent reviews
+                    reviews = review_db.get_food_reviews(food_id)
+                    if reviews:
+                        recent_comments = []
+                        for review in reviews[:3]:  # Last 3 reviews
+                            if review['comment']:
+                                recent_comments.append(f"'{review['comment']}' - {review['user_first_name']}")
+                        if recent_comments:
+                            desc += f"\n  نظرات اخیر: {'; '.join(recent_comments)}"
+                
+                food_descriptions.append(desc)
+            
+            # Create comprehensive prompt
+            prompt = f"""
+شما یک متخصص تغذیه و مشاور غذایی هستید که باید بهترین گزینه غذایی را از میان گزینه‌های زیر انتخاب کنید:
+
+{chr(10).join(food_descriptions)}
+
+اطلاعات اضافی از نظرات کاربران قبلی:
+"""
+            
+            # Add review context
+            if review_summaries:
+                prompt += "\nخلاصه نظرات کاربران:\n"
+                for summary in review_summaries[:10]:  # Top 10 reviewed items
+                    prompt += f"- {summary['food_name']}: امتیاز {summary['average_rating']}/5 ({summary['review_count']} نظر)\n"
+                    if summary['comments']:
+                        # Get first few words of comments
+                        comments_preview = summary['comments'][:200] + "..." if len(summary['comments']) > 200 else summary['comments']
+                        prompt += f"  نمونه نظرات: {comments_preview}\n"
+            
+            prompt += """
+
+لطفاً با در نظر گیری موارد زیر، بهترین گزینه را توصیه کنید:
+1. ارزش غذایی و سلامتی
+2. تعادل مواد مغذی
+3. کیفیت مواد اولیه (بر اساس نظرات کاربران)
+4. رضایت کاربران قبلی
+5. مناسب بودن برای وعده غذایی
+6. نسبت قیمت به کیفیت
+
+پاسخ خود را به صورت مختصر و مفید ارائه دهید، دلیل انتخاب خود را بیان کنید و در صورت وجود، از نظرات کاربران قبلی نیز استفاده کنید.
+"""
+            
+            # Try models in fallback sequence
+            for model in self.model_urls:
+                logger.info(f"Trying {model['name']}...")
+                recommendation = await self._call_gemini_api(model['url'], prompt, model['name'])
+                
+                if recommendation and not self._is_error_response(recommendation):
+                    logger.info(f"Successfully got recommendation from {model['name']}")
+                    return f"🤖 توصیه از {model['name']}:\n\n{recommendation}"
                 else:
-                    await msg.edit("❌ ورود موفق بود اما دریافت اطلاعات رزرو ناموفق بود.")
-                    self.user_states[user_id] = 'main_menu'
-            else:
-                await msg.edit("❌ نام کاربری یا رمز عبور اشتباه است.")
-                self.user_states[user_id] = 'main_menu'
+                    logger.warning(f"{model['name']} failed, trying next model...")
+            
+            # If all models fail
+            logger.error("All AI models failed to provide recommendation")
+            return "متأسفانه تمام مدل‌های هوش مصنوعی در دسترس نیستند. لطفاً بر اساس سلیقه خود انتخاب کنید."
+                    
         except Exception as e:
-            await msg.delete()
-            await self.send_error_explanation(event, e)
-            self.user_states[user_id] = 'main_menu'
+            logger.error(f"AI recommendation error: {e}")
+            return "خطا در دریافت توصیه هوش مصنوعی. لطفاً بر اساس سلیقه خود انتخاب کنید."
+    
+    def _is_error_response(self, response: str) -> bool:
+        """Check if the response indicates an error"""
+        error_indicators = [
+            "خطا", "error", "failed", "متأسفانه", "نمی‌توانم", 
+            "در دسترس نیست", "مشکل", "امکان‌پذیر نیست"
+        ]
+        return any(indicator in response.lower() for indicator in error_indicators)
+    
+    async def _call_gemini_api(self, url: str, prompt: str, model_name: str) -> str:
+        """Call Gemini API with the given URL and prompt"""
+        try:
+            headers = {
+                'Content-Type': 'application/json',
+            }
+            
+            data = {
+                "contents": [{
+                    "parts": [{
+                        "text": prompt
+                    }]
+                }],
+                "generationConfig": {
+                    "temperature": 0.7,
+                    "topK": 40,
+                    "topP": 0.95,
+                    "maxOutputTokens": 1024,
+                }
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{url}?key={self.api_key}",
+                    headers=headers,
+                    json=data,
+                    timeout=aiohttp.ClientTimeout(total=30)
+                ) as response:
+                    if response.status == 200:
+                        result = await response.json()
+                        if 'candidates' in result and len(result['candidates']) > 0:
+                            content = result['candidates'][0]['content']['parts'][0]['text']
+                            return content
+                    else:
+                        logger.error(f"{model_name} API error: {response.status}")
+                        if response.status == 429:
+                            logger.warning(f"{model_name} rate limited")
+                        elif response.status == 403:
+                            logger.warning(f"{model_name} access forbidden")
+                    
+                    return None
+                    
+        except asyncio.TimeoutError:
+            logger.error(f"{model_name} API timeout")
+            return None
+        except Exception as e:
+            logger.error(f"{model_name} API call error: {e}")
+            return None
 
-    async def show_days_menu(self, event, edit=False):
-        user_id = event.sender_id
-        res_data = self.user_data.get(user_id, {}).get('reservation_data', [])
-        buttons = [[Button.inline(f'{d["DayTitle"]} - {d["DayDate"]}', data=f'day_{d["DayDate"]}')] for d in res_data if d.get("DayState") == 0]
-        buttons.append([Button.inline(Config.BTN_BACK_TO_MAIN, data=b'back_to_main')])
-        message = "📅 روز مورد نظر را انتخاب کنید:" if len(buttons) > 1 else "روز فعالی برای رزرو یافت نشد."
+class EnhancedFoodReservationBot:
+    """Enhanced bot class with review system and multi-model AI"""
+    
+    def __init__(self, token: str, gemini_api_key: str):
+        self.token = token
+        self.api_client = FoodReservationAPI()
+        self.ai_client = MultiModelGeminiAI(gemini_api_key)
+        self.review_db = ReviewDatabase()
+        self.user_sessions = {}  # Store user session data
+    
+    def get_main_keyboard(self) -> InlineKeyboardMarkup:
+        """Get main menu keyboard"""
+        keyboard = [
+            [InlineKeyboardButton(PERSIAN_TEXT['login'], callback_data='login')],
+            [InlineKeyboardButton(PERSIAN_TEXT['view_reservations'], callback_data='view_reservations')],
+            [InlineKeyboardButton(PERSIAN_TEXT['ai_help'], callback_data='ai_help')],
+            [InlineKeyboardButton(PERSIAN_TEXT['my_reviews'], callback_data='my_reviews')],
+            [InlineKeyboardButton(PERSIAN_TEXT['help'], callback_data='help')]
+        ]
+        return InlineKeyboardMarkup(keyboard)
+    
+    def get_back_keyboard(self) -> InlineKeyboardMarkup:
+        """Get back button keyboard"""
+        keyboard = [
+            [InlineKeyboardButton(PERSIAN_TEXT['back'], callback_data='back')]
+        ]
+        return InlineKeyboardMarkup(keyboard)
+    
+    def get_rating_keyboard(self) -> InlineKeyboardMarkup:
+        """Get rating selection keyboard"""
+        keyboard = [
+            [
+                InlineKeyboardButton("⭐", callback_data='rating_1'),
+                InlineKeyboardButton("⭐⭐", callback_data='rating_2'),
+                InlineKeyboardButton("⭐⭐⭐", callback_data='rating_3')
+            ],
+            [
+                InlineKeyboardButton("⭐⭐⭐⭐", callback_data='rating_4'),
+                InlineKeyboardButton("⭐⭐⭐⭐⭐", callback_data='rating_5')
+            ],
+            [InlineKeyboardButton(PERSIAN_TEXT['skip_review'], callback_data='skip_review')]
+        ]
+        return InlineKeyboardMarkup(keyboard)
+    
+    async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Start command handler"""
+        await update.message.reply_text(
+            PERSIAN_TEXT['welcome'],
+            reply_markup=self.get_main_keyboard()
+        )
+    
+    async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Help command handler"""
+        help_text = """
+🤖 راهنمای استفاده از ربات رزرو غذا
+
+📋 امکانات:
+• ورود به حساب کاربری
+• مشاهده رزروهای موجود
+• انجام رزرو غذا
+• کمک هوش مصنوعی برای انتخاب غذا (با 4 مدل پشتیبان)
+• ثبت نظر و امتیاز برای غذاها
+• مشاهده نظرات خود
+• لغو رزرو
+
+🔐 برای شروع، ابتدا وارد حساب کاربری خود شوید.
+📱 از دکمه‌های زیر پیام‌ها استفاده کنید.
+⭐ پس از رزرو، نظر خود را ثبت کنید تا به بهبود توصیه‌ها کمک کنید.
+🤖 سیستم هوش مصنوعی از 4 مدل مختلف برای بهترین توصیه استفاده می‌کند.
+❓ برای کمک بیشتر از /help استفاده کنید.
+        """
+        await update.message.reply_text(help_text, reply_markup=self.get_main_keyboard())
+    
+    async def button_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Handle inline keyboard button presses"""
+        query = update.callback_query
+        await query.answer()
         
-        if edit: await event.edit(message, buttons=buttons)
-        else: await event.respond(message, buttons=buttons)
-
-    @events.register(events.CallbackQuery)
-    async def callback_query_handler(self, event):
-        user_id = event.sender_id
-        state = self.user_states.get(user_id)
-        data_str = event.data.decode('utf-8')
-
-        if data_str == 'back_to_main':
-            self.user_states[user_id] = 'main_menu'
-            await event.delete()
-            await self.bot.send_message(user_id, "به منوی اصلی بازگشتید.", buttons=self.get_main_menu())
-            return
+        user_id = query.from_user.id
+        data = query.data
         
-        if state == 'choosing_day' and data_str.startswith('day_'):
-            await self.handle_day_selection(event)
-        elif state == 'reservation_action':
-            await self.handle_reservation_action(event)
-
-    async def handle_day_selection(self, event):
-        user_id = event.sender_id
-        date = event.data.decode('utf-8').split('_')[1]
-        self.user_data[user_id]['selected_date'] = date
-        day_data = next((d for d in self.user_data[user_id]['reservation_data'] if d['DayDate'] == date), None)
-        if not day_data:
-            await event.answer("روز یافت نشد!", alert=True)
-            return
-
-        self.user_data[user_id]['selected_day_data'] = day_data
-        buttons = [[Button.inline(f"رزرو {m['MealName']}", data=f'meal_{m["MealId"]}')] for m in day_data.get("Meals", []) if m.get("FoodMenu") and m.get("MealState") == 0]
-        buttons.append([Button.inline("🤖 پیشنهاد هوش مصنوعی", data=b"ai_suggest")])
-        buttons.append([Button.inline("⬅️ بازگشت به روزها", data=b"back_to_days")])
-        
-        await event.edit(f'انتخاب برای روز {date}:', buttons=buttons)
-        self.user_states[user_id] = 'reservation_action'
-
-    async def handle_reservation_action(self, event):
-        user_id = event.sender_id
-        action = event.data.decode('utf-8')
-
-        if action == "back_to_days":
-            self.user_states[user_id] = 'choosing_day'
-            await self.show_days_menu(event, edit=True)
-            return
-
-        if action == "ai_suggest":
-            await event.answer("🧠 در حال پردازش...")
-            day_data = self.user_data[user_id].get('selected_day_data')
-            recommendation = await self.get_ai_recommendation(day_data)
-            await event.edit(f"💡 **پیشنهاد هوش مصنوعی:**\n\n{recommendation}", buttons=await event.get_buttons())
-            return
-
-        if action.startswith("meal_"):
-            await event.answer("⏳ در حال ثبت رزرو...")
-            try:
-                meal_id = int(action.split('_')[1])
-                day_data = self.user_data[user_id]['selected_day_data']
-                meal_data = next((m for m in day_data['Meals'] if m['MealId'] == meal_id), None)
-                food = meal_data['FoodMenu'][0]
-                self_data = food['SelfMenu'][0]
-
-                payload = [{
-                    "Date": day_data["DayDate"], "MealId": meal_id, "FoodId": food["FoodId"],
-                    "SelfId": self_data["SelfId"], "Counts": 1, "Price": self_data.get("Price", 0),
-                    "State": 0, "Type": 1, "OP": 1, # Default values from observation
-                    # ... other necessary fields can be added here if required
-                }]
+        if data == 'login':
+            await query.edit_message_text(
+                PERSIAN_TEXT['login_prompt'],
+                reply_markup=self.get_back_keyboard()
+            )
+            return LOGIN_USERNAME
+            
+        elif data == 'view_reservations':
+            if user_id not in self.user_sessions or not self.user_sessions[user_id].get('logged_in'):
+                await query.edit_message_text(
+                    "ابتدا باید وارد حساب کاربری خود شوید.",
+                    reply_markup=self.get_main_keyboard()
+                )
+                return ConversationHandler.END
+            
+            await query.edit_message_text(PERSIAN_TEXT['processing'])
+            reservations = await self.api_client.get_reservations()
+            
+            if not reservations:
+                await query.edit_message_text(
+                    PERSIAN_TEXT['no_reservations'],
+                    reply_markup=self.get_main_keyboard()
+                )
+                return ConversationHandler.END
+            
+            # Create reservation selection keyboard with reviews info
+            keyboard = []
+            for i, reservation in enumerate(reservations):
+                name = reservation.get('name', f'رزرو {i+1}')
+                date = reservation.get('date', '')
+                food_id = reservation.get('id', '')
                 
-                system = self.user_data[user_id]['system']
-                success, message = await system.make_reservation(payload)
+                # Add rating info if available
+                stats = self.review_db.get_food_stats(food_id)
+                rating_info = ""
+                if stats['total_reviews'] > 0:
+                    rating_info = f" ⭐{stats['average_rating']}"
                 
-                final_message = f"✅ {message}" if success else f"❌ {message}"
-                await event.edit(final_message, buttons=[[Button.inline("⬅️ بازگشت به روزها", data=b"back_to_days")]])
-            except Exception as e:
-                await event.delete()
-                await self.send_error_explanation(event, e)
-                self.user_states[user_id] = 'main_menu'
+                button_text = f"{name} - {date}{rating_info}"
+                keyboard.append([InlineKeyboardButton(button_text, callback_data=f'reserve_{i}')])
+            
+            keyboard.append([InlineKeyboardButton(PERSIAN_TEXT['ai_help'], callback_data='ai_help_reservations')])
+            keyboard.append([InlineKeyboardButton(PERSIAN_TEXT['back'], callback_data='back')])
+            
+            context.user_data['reservations'] = reservations
+            
+            await query.edit_message_text(
+                PERSIAN_TEXT['select_reservation'],
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            return RESERVATION_SELECTION
+            
+        elif data == 'ai_help' or data == 'ai_help_reservations':
+            if user_id not in self.user_sessions or not self.user_sessions[user_id].get('logged_in'):
+                await query.edit_message_text(
+                    "ابتدا باید وارد حساب کاربری خود شوید.",
+                    reply_markup=self.get_main_keyboard()
+                )
+                return ConversationHandler.END
+            
+            await query.edit_message_text(PERSIAN_TEXT['ai_help_prompt'])
+            reservations = await self.api_client.get_reservations()
+            
+            if reservations:
+                recommendation = await self.ai_client.get_food_recommendation(reservations, self.review_db)
+                await query.edit_message_text(
+                    f"{PERSIAN_TEXT['ai_recommendation']}\n\n{recommendation}",
+                    reply_markup=self.get_main_keyboard()
+                )
+            else:
+                await query.edit_message_text(
+                    PERSIAN_TEXT['no_reservations'],
+                    reply_markup=self.get_main_keyboard()
+                )
+            return ConversationHandler.END
+            
+        elif data == 'my_reviews':
+            if user_id not in self.user_sessions or not self.user_sessions[user_id].get('logged_in'):
+                await query.edit_message_text(
+                    "ابتدا باید وارد حساب کاربری خود شوید.",
+                    reply_markup=self.get_main_keyboard()
+                )
+                return ConversationHandler.END
+            
+            reviews = self.review_db.get_user_reviews(user_id)
+            
+            if not reviews:
+                await query.edit_message_text(
+                    "شما هنوز نظری ثبت نکرده‌اید.",
+                    reply_markup=self.get_main_keyboard()
+                )
+                return ConversationHandler.END
+            
+            # Format reviews for display
+            reviews_text = f"{PERSIAN_TEXT['your_reviews_title']}\n\n"
+            for review in reviews[:10]:  # Show last 10 reviews
+                reviews_text += f"🍽️ {review['food_name']}\n"
+                reviews_text += f"⭐ امتیاز: {review['rating']}/5\n"
+                if review['comment']:
+                    reviews_text += f"💭 نظر: {review['comment']}\n"
+                reviews_text += f"📅 {review['created_at'][:10]}\n\n"
+            
+            await query.edit_message_text(
+                reviews_text,
+                reply_markup=self.get_main_keyboard()
+            )
+            return ConversationHandler.END
+            
+        elif data == 'back':
+            await query.edit_message_text(
+                PERSIAN_TEXT['welcome'],
+                reply_markup=self.get_main_keyboard()
+            )
+            return ConversationHandler.END
+            
+        elif data.startswith('reserve_'):
+            reservation_index = int(data.split('_')[1])
+            reservations = context.user_data.get('reservations', [])
+            
+            if reservation_index < len(reservations):
+                reservation = reservations[reservation_index]
+                food_id = reservation.get('id', '')
+                
+                # Show reservation details with reviews
+                details = f"{PERSIAN_TEXT['food_details']}\n\n"
+                details += f"🍽️ نام: {reservation.get('name', 'نامشخص')}\n"
+                details += f"📅 تاریخ: {reservation.get('date', 'نامشخص')}\n"
+                details += f"⏰ زمان: {reservation.get('time', 'نامشخص')}\n"
+                if reservation.get('description'):
+                    details += f"📝 توضیحات: {reservation['description']}\n"
+                if reservation.get('price'):
+                    details += f"💰 قیمت: {reservation['price']} تومان\n"
+                
+                # Add review statistics
+                stats = self.review_db.get_food_stats(food_id)
+                if stats['total_reviews'] > 0:
+                    details += f"\n⭐ میانگین امتیاز: {stats['average_rating']}/5\n"
+                    details += f"📊 تعداد نظرات: {stats['total_reviews']}\n"
+                
+                keyboard = [
+                    [InlineKeyboardButton(PERSIAN_TEXT['confirm_reservation'], callback_data=f'confirm_{reservation_index}')],
+                    [InlineKeyboardButton(PERSIAN_TEXT['view_reviews'], callback_data=f'view_reviews_{reservation_index}')],
+                    [InlineKeyboardButton(PERSIAN_TEXT['back'], callback_data='view_reservations')]
+                ]
+                
+                await query.edit_message_text(
+                    details,
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+            return RESERVATION_SELECTION
+            
+        elif data.startswith('view_reviews_'):
+            reservation_index = int(data.split('_')[2])
+            reservations = context.user_data.get('reservations', [])
+            
+            if reservation_index < len(reservations):
+                reservation = reservations[reservation_index]
+                food_id = reservation.get('id', '')
+                food_name = reservation.get('name', 'نامشخص')
+                
+                reviews = self.review_db.get_food_reviews(food_id)
+                
+                if not reviews:
+                    reviews_text = f"📝 نظرات برای {food_name}\n\n{PERSIAN_TEXT['no_reviews']}"
+                else:
+                    reviews_text = f"📝 نظرات برای {food_name}\n\n"
+                    for review in reviews[:5]:  # Show last 5 reviews
+                        reviews_text += f"👤 {review['user_first_name']}\n"
+                        reviews_text += f"⭐ امتیاز: {review['rating']}/5\n"
+                        if review['comment']:
+                            reviews_text += f"💭 {review['comment']}\n"
+                        reviews_text += f"📅 {review['created_at'][:10]}\n\n"
+                
+                keyboard = [
+                    [InlineKeyboardButton(PERSIAN_TEXT['back'], callback_data=f'reserve_{reservation_index}')]
+                ]
+                
+                await query.edit_message_text(
+                    reviews_text,
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+            return RESERVATION_SELECTION
+            
+        elif data.startswith('confirm_'):
+            reservation_index = int(data.split('_')[1])
+            reservations = context.user_data.get('reservations', [])
+            
+            if reservation_index < len(reservations):
+                reservation = reservations[reservation_index]
+                reservation_id = reservation.get('id', '')
+                
+                await query.edit_message_text(PERSIAN_TEXT['processing'])
+                
+                success = await self.api_client.make_reservation(reservation_id)
+                
+                if success:
+                    # Store reservation info for review
+                    context.user_data['last_reservation'] = reservation
+                    
+                    keyboard = [
+                        [InlineKeyboardButton(PERSIAN_TEXT['leave_review'], callback_data='leave_review')],
+                        [InlineKeyboardButton(PERSIAN_TEXT['skip_review'], callback_data='skip_review')]
+                    ]
+                    
+                    await query.edit_message_text(
+                        PERSIAN_TEXT['reservation_success'],
+                        reply_markup=InlineKeyboardMarkup(keyboard)
+                    )
+                    return REVIEW_RATING
+                else:
+                    await query.edit_message_text(
+                        PERSIAN_TEXT['reservation_failed'],
+                        reply_markup=self.get_main_keyboard()
+                    )
+            
+            return ConversationHandler.END
+            
+        elif data == 'leave_review':
+            await query.edit_message_text(
+                PERSIAN_TEXT['rating_prompt'],
+                reply_markup=self.get_rating_keyboard()
+            )
+            return REVIEW_RATING
+            
+        elif data == 'skip_review':
+            await query.edit_message_text(
+                PERSIAN_TEXT['welcome'],
+                reply_markup=self.get_main_keyboard()
+            )
+            return ConversationHandler.END
+            
+        elif data.startswith('rating_'):
+            rating = int(data.split('_')[1])
+            context.user_data['review_rating'] = rating
+            
+            await query.edit_message_text(
+                PERSIAN_TEXT['comment_prompt'],
+                reply_markup=self.get_back_keyboard()
+            )
+            return REVIEW_COMMENT
+            
+        elif data == 'help':
+            await self.help_command(update, context)
+            return ConversationHandler.END
+        
+        return ConversationHandler.END
+    
+    async def username_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Handle username input"""
+        username = update.message.text.strip()
+        context.user_data['username'] = username
+        
+        await update.message.reply_text(
+            PERSIAN_TEXT['password_prompt'],
+            reply_markup=self.get_back_keyboard()
+        )
+        return LOGIN_PASSWORD
+    
+    async def password_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Handle password input"""
+        password = update.message.text.strip()
+        username = context.user_data.get('username', '')
+        user_id = update.effective_user.id
+        
+        # Delete the password message for security
+        try:
+            await update.message.delete()
+        except:
+            pass
+        
+        # Show processing message
+        processing_msg = await update.message.reply_text(PERSIAN_TEXT['processing'])
+        
+        # Attempt login
+        success = await self.api_client.login(username, password)
+        
+        if success:
+            # Store user session
+            self.user_sessions[user_id] = {
+                'logged_in': True,
+                'username': username,
+                'login_time': datetime.now()
+            }
+            
+            await processing_msg.edit_text(
+                PERSIAN_TEXT['login_success'],
+                reply_markup=self.get_main_keyboard()
+            )
+        else:
+            await processing_msg.edit_text(
+                PERSIAN_TEXT['login_failed'],
+                reply_markup=self.get_main_keyboard()
+            )
+        
+        return ConversationHandler.END
+    
+    async def review_comment_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Handle review comment input"""
+        comment = update.message.text.strip()
+        user_id = update.effective_user.id
+        user_first_name = update.effective_user.first_name or "کاربر"
+        
+        # Skip if user typed /skip
+        if comment.lower() == '/skip':
+            await update.message.reply_text(
+                PERSIAN_TEXT['welcome'],
+                reply_markup=self.get_main_keyboard()
+            )
+            return ConversationHandler.END
+        
+        # Get reservation and rating info
+        reservation = context.user_data.get('last_reservation', {})
+        rating = context.user_data.get('review_rating', 5)
+        
+        food_id = reservation.get('id', '')
+        food_name = reservation.get('name', 'نامشخص')
+        
+        # Save review to database
+        success = self.review_db.add_review(
+            user_id=user_id,
+            user_first_name=user_first_name,
+            food_id=food_id,
+            food_name=food_name,
+            rating=rating,
+            comment=comment
+        )
+        
+        if success:
+            await update.message.reply_text(
+                PERSIAN_TEXT['review_saved'],
+                reply_markup=self.get_main_keyboard()
+            )
+        else:
+            await update.message.reply_text(
+                PERSIAN_TEXT['error'],
+                reply_markup=self.get_main_keyboard()
+            )
+        
+        return ConversationHandler.END
+    
+    async def cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Cancel conversation"""
+        await update.message.reply_text(
+            PERSIAN_TEXT['welcome'],
+            reply_markup=self.get_main_keyboard()
+        )
+        return ConversationHandler.END
+    
+    def create_application(self) -> Application:
+        """Create and configure the bot application"""
+        application = Application.builder().token(self.token).build()
+        
+        # Conversation handler for login and reservations
+        conv_handler = ConversationHandler(
+            entry_points=[
+                CommandHandler('start', self.start),
+                CallbackQueryHandler(self.button_handler)
+            ],
+            states={
+                LOGIN_USERNAME: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.username_handler),
+                    CallbackQueryHandler(self.button_handler)
+                ],
+                LOGIN_PASSWORD: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.password_handler),
+                    CallbackQueryHandler(self.button_handler)
+                ],
+                RESERVATION_SELECTION: [
+                    CallbackQueryHandler(self.button_handler)
+                ],
+                AI_HELP: [
+                    CallbackQueryHandler(self.button_handler)
+                ],
+                REVIEW_RATING: [
+                    CallbackQueryHandler(self.button_handler)
+                ],
+                REVIEW_COMMENT: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.review_comment_handler),
+                    CallbackQueryHandler(self.button_handler)
+                ]
+            },
+            fallbacks=[
+                CommandHandler('cancel', self.cancel),
+                CallbackQueryHandler(self.button_handler)
+            ]
+        )
+        
+        application.add_handler(conv_handler)
+        application.add_handler(CommandHandler('help', self.help_command))
+        
+        return application
 
 async def main():
-    bot_instance = GroupCreatorBot()
-    bot_instance.register_handlers()
-    await bot_instance.bot.start(bot_token=BOT_TOKEN)
-    LOGGER.info("Bot is running...")
-    await bot_instance.bot.run_until_disconnected()
+    """Main function to run the bot"""
+    # Get configuration from environment variables
+    bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
+    gemini_api_key = os.getenv('GEMINI_API_KEY')
+    
+    if not bot_token:
+        logger.error("TELEGRAM_BOT_TOKEN environment variable is required")
+        sys.exit(1)
+    
+    if not gemini_api_key:
+        logger.error("GEMINI_API_KEY environment variable is required")
+        sys.exit(1)
+    
+    # Create and run the bot
+    bot = EnhancedFoodReservationBot(bot_token, gemini_api_key)
+    application = bot.create_application()
+    
+    logger.info("Starting Enhanced Food Reservation Bot with Multi-Model AI Fallback...")
+    logger.info("AI Fallback Sequence: Gemini 2.5 Pro → Gemini 2.5 Flash → Gemini 2.0 Flash → Gemini 1.5 Flash")
+    
+    try:
+        # Run the bot
+        await application.run_polling(allowed_updates=Update.ALL_TYPES)
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user")
+    except Exception as e:
+        logger.error(f"Bot error: {e}")
+    finally:
+        # Clean up
+        await bot.api_client.close_session()
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     asyncio.run(main())
