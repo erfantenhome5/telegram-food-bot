@@ -1020,42 +1020,29 @@ async def main():
     """Main function to run the bot"""
     # Get configuration from environment variables
     bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
-    # gemini_api_key = os.getenv('GEMINI_API_KEY') # Commented out as AI is disabled
 
     # --- Environment variable checks moved to the very beginning ---
     if not bot_token:
         logger.error("TELEGRAM_BOT_TOKEN environment variable is required")
         sys.exit(1)
 
-    # If AI is commented out, gemini_api_key is not strictly required for bot's core function.
-    # However, if EnhancedFoodReservationBot.__init__ still expects it, pass a dummy value.
-    # if not gemini_api_key:
-    #     logger.warning("GEMINI_API_KEY environment variable is missing. AI features will be unavailable.")
-    #     gemini_api_key = "" # Ensure it's an empty string if not set
-
     # Create and run the bot
     # Pass an empty string for gemini_api_key since AI is disabled
-    bot = EnhancedFoodReservationBot(bot_token, "")
+    bot = EnhancedFoodReservationBot(bot_token, "") # gemini_api_key is still passed but not used by AI_client
     application = bot.create_application()
 
     logger.info("Starting Enhanced Food Reservation Bot (AI disabled for debugging)...")
 
     try:
-        # Explicitly initialize the application
-        await application.initialize()
-        # Run the bot
+        # Run the bot, Application.run_polling() handles initialize and shutdown internally
         await application.run_polling(allowed_updates=Update.ALL_TYPES)
     except KeyboardInterrupt:
         logger.info("Bot stopped by user")
     except Exception as e:
-        logger.error(f"Bot error: {e}")
+        logger.error(f"Bot error: {e}", exc_info=True) # Log full traceback for better debugging
     finally:
-        # Ensure the application is stopped gracefully before closing the session
-        # This check prevents trying to shutdown an application that never fully started or is already stopped
-        if application.running: # Check if the application is currently running
-            logger.info("Shutting down Telegram bot application gracefully...")
-            await application.shutdown()
         # Clean up API client session
+        # application.shutdown() is implicitly handled by run_polling's exit
         await bot.api_client.close_session()
 
 if __name__ == '__main__':
