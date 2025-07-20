@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Enhanced Telegram Food Reservation Bot with Review System and Multi-Model AI Fallback
+Enhanced Telegram Food Reservation Bot with Review System (AI Fallback commented out for debugging)
 A bot that helps users login to their food reservation account,
-view available reservations, make reservations with AI assistance,
+view available reservations, make reservations,
 and leave reviews for food items.
-
-AI Fallback Sequence: Gemini 2.5 Pro → Gemini 2.5 Flash → Gemini 2.0 Flash → Gemini 1.5 Flash
 """
 
 import logging
@@ -57,13 +55,13 @@ PERSIAN_TEXT = {
     'select_reservation': '👆 لطفاً رزرو مورد نظر خود را انتخاب کنید:',
     'reservation_success': '✅ رزرو با موفقیت انجام شد!\n\n💭 آیا می‌خواهید نظر خود را درباره این غذا ثبت کنید؟',
     'reservation_failed': '❌ رزرو ناموفق بود. لطفاً دوباره تلاش کنید.',
-    'ai_help_prompt': '🤖 هوش مصنوعی در حال بررسی گزینه‌های غذایی شما است...',
-    'ai_recommendation': '🎯 توصیه هوش مصنوعی:',
+    'ai_help_prompt': '🤖 هوش مصنوعی در حال بررسی گزینه‌های غذایی شما است...', # Kept for consistency in text, but AI is disabled
+    'ai_recommendation': '🎯 توصیه هوش مصنوعی:', # Kept for consistency in text, but AI is disabled
     'cancel': '❌ لغو',
     'back': '🔙 بازگشت',
     'login': '🔐 ورود',
     'view_reservations': '📋 مشاهده رزروها',
-    'ai_help': '🤖 کمک هوش مصنوعی',
+    'ai_help': '🤖 کمک هوش مصنوعی', # Kept for consistency in text, but AI is disabled
     'my_reviews': '📝 نظرات من',
     'logout': '🚪 خروج',
     'help': '❓ راهنما',
@@ -389,186 +387,187 @@ class FoodReservationAPI:
             logger.error(f"Cancel reservation error: {e}")
             return False
 
-class MultiModelGeminiAI:
-    """Enhanced Gemini AI integration with multi-model fallback sequence"""
-
-    def __init__(self, api_key: str):
-        self.api_key = api_key
-        # AI Model URLs in fallback order: 2.5 Pro → 2.5 Flash → 2.0 Flash → 1.5 Flash
-        self.model_urls = [
-            {
-                'name': 'Gemini 2.5 Pro',
-                'url': 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent'
-            },
-            {
-                'name': 'Gemini 2.5 Flash',
-                'url': 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent'
-            },
-            {
-                'name': 'Gemini 2.0 Flash',
-                'url': 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent'
-            },
-            {
-                'name': 'Gemini 1.5 Flash',
-                'url': 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent'
-            }
-        ]
-
-    async def get_food_recommendation(self, food_options: List[Dict], review_db: ReviewDatabase) -> str:
-        """Get AI recommendation for food selection using reviews data with multi-model fallback"""
-        try:
-            # Get review summaries for context
-            review_summaries = review_db.get_all_reviews_summary()
-
-            # Create enhanced prompt with reviews data
-            food_descriptions = []
-            for option in food_options:
-                food_id = option.get('id', '')
-                food_name = option.get('name', 'نامشخص')
-
-                desc = f"- {food_name}"
-                if option.get('description'):
-                    desc += f": {option['description']}"
-                if option.get('calories'):
-                    desc += f" (کالری: {option['calories']})"
-                if option.get('price'):
-                    desc += f" (قیمت: {option['price']} تومان)"
-
-                # Add review data if available
-                stats = review_db.get_food_stats(food_id)
-                if stats['total_reviews'] > 0:
-                    desc += f" (امتیاز: {stats['average_rating']}/5 از {stats['total_reviews']} نظر)"
-
-                    # Add recent reviews
-                    reviews = review_db.get_food_reviews(food_id)
-                    if reviews:
-                        recent_comments = []
-                        for review in reviews[:3]:  # Last 3 reviews
-                            if review['comment']:
-                                recent_comments.append(f"'{review['comment']}' - {review['user_first_name']}")
-                        if recent_comments:
-                            desc += f"\n  نظرات اخیر: {'; '.join(recent_comments)}"
-
-                food_descriptions.append(desc)
-
-            # Create comprehensive prompt
-            prompt = f"""
-شما یک متخصص تغذیه و مشاور غذایی هستید که باید بهترین گزینه غذایی را از میان گزینه‌های زیر انتخاب کنید:
-
-{chr(10).join(food_descriptions)}
-
-اطلاعات اضافی از نظرات کاربران قبلی:
-"""
-
-            # Add review context
-            if review_summaries:
-                prompt += "\nخلاصه نظرات کاربران:\n"
-                for summary in review_summaries[:10]:  # Top 10 reviewed items
-                    prompt += f"- {summary['food_name']}: امتیاز {summary['average_rating']}/5 ({summary['review_count']} نظر)\n"
-                    if summary['comments']:
-                        # Get first few words of comments
-                        comments_preview = summary['comments'][:200] + "..." if len(summary['comments']) > 200 else summary['comments']
-                        prompt += f"  نمونه نظرات: {comments_preview}\n"
-
-            prompt += """
-
-لطفاً با در نظر گیری موارد زیر، بهترین گزینه را توصیه کنید:
-1. ارزش غذایی و سلامتی
-2. تعادل مواد مغذی
-3. کیفیت مواد اولیه (بر اساس نظرات کاربران)
-4. رضایت کاربران قبلی
-5. مناسب بودن برای وعده غذایی
-6. نسبت قیمت به کیفیت
-
-پاسخ خود را به صورت مختصر و مفید ارائه دهید، دلیل انتخاب خود را بیان کنید و در صورت وجود، از نظرات کاربران قبلی نیز استفاده کنید.
-"""
-
-            # Try models in fallback sequence
-            for model in self.model_urls:
-                logger.info(f"Trying {model['name']}...")
-                recommendation = await self._call_gemini_api(model['url'], prompt, model['name'])
-
-                if recommendation and not self._is_error_response(recommendation):
-                    logger.info(f"Successfully got recommendation from {model['name']}")
-                    return f"🤖 توصیه از {model['name']}:\n\n{recommendation}"
-                else:
-                    logger.warning(f"{model['name']} failed, trying next model...")
-
-            # If all models fail
-            logger.error("All AI models failed to provide recommendation")
-            return "متأسفانه تمام مدل‌های هوش مصنوعی در دسترس نیستند. لطفاً بر اساس سلیقه خود انتخاب کنید."
-
-        except Exception as e:
-            logger.error(f"AI recommendation error: {e}")
-            return "خطا در دریافت توصیه هوش مصنوعی. لطفلاً بر اساس سلیقه خود انتخاب کنید."
-
-    def _is_error_response(self, response: str) -> bool:
-        """Check if the response indicates an error"""
-        error_indicators = [
-            "خطا", "error", "failed", "متأسفانه", "نمی‌توانم",
-            "در دسترس نیست", "مشکل", "امکان‌پذیر نیست"
-        ]
-        return any(indicator in response.lower() for indicator in error_indicators)
-
-    async def _call_gemini_api(self, url: str, prompt: str, model_name: str) -> str:
-        """Call Gemini API with the given URL and prompt"""
-        try:
-            # Modified: Use X-goog-api-key header
-            headers = {
-                'Content-Type': 'application/json',
-                'X-goog-api-key': self.api_key, # Use API key in header
-            }
-
-            data = {
-                "contents": [{
-                    "parts": [{
-                        "text": prompt
-                    }]
-                }],
-                "generationConfig": {
-                    "temperature": 0.7,
-                    "topK": 40,
-                    "topP": 0.95,
-                    "maxOutputTokens": 1024,
-                }
-            }
-
-            async with aiohttp.ClientSession() as session:
-                # Modified: Remove API key from URL query parameter
-                async with session.post(
-                    url, # URL without ?key=
-                    headers=headers,
-                    json=data,
-                    timeout=aiohttp.ClientTimeout(total=30)
-                ) as response:
-                    if response.status == 200:
-                        result = await response.json()
-                        if 'candidates' in result and len(result['candidates']) > 0:
-                            content = result['candidates'][0]['content']['parts'][0]['text']
-                            return content
-                    else:
-                        logger.error(f"{model_name} API error: {response.status}")
-                        if response.status == 429:
-                            logger.warning(f"{model_name} rate limited")
-                        elif response.status == 403:
-                            logger.warning(f"{model_name} access forbidden")
-
-                    return None
-
-        except asyncio.TimeoutError:
-            logger.error(f"{model_name} API timeout")
-            return None
-        except Exception as e:
-            logger.error(f"{model_name} API call error: {e}")
-            return None
+# Commented out the MultiModelGeminiAI class
+# class MultiModelGeminiAI:
+#     """Enhanced Gemini AI integration with multi-model fallback sequence"""
+#
+#     def __init__(self, api_key: str):
+#         self.api_key = api_key
+#         # AI Model URLs in fallback order: 2.5 Pro → 2.5 Flash → 2.0 Flash → 1.5 Flash
+#         self.model_urls = [
+#             {
+#                 'name': 'Gemini 2.5 Pro',
+#                 'url': 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent'
+#             },
+#             {
+#                 'name': 'Gemini 2.5 Flash',
+#                 'url': 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent'
+#             },
+#             {
+#                 'name': 'Gemini 2.0 Flash',
+#                 'url': 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent'
+#             },
+#             {
+#                 'name': 'Gemini 1.5 Flash',
+#                 'url': 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent'
+#             }
+#         ]
+#
+#     async def get_food_recommendation(self, food_options: List[Dict], review_db: ReviewDatabase) -> str:
+#         """Get AI recommendation for food selection using reviews data with multi-model fallback"""
+#         try:
+#             # Get review summaries for context
+#             review_summaries = review_db.get_all_reviews_summary()
+#
+#             # Create enhanced prompt with reviews data
+#             food_descriptions = []
+#             for option in food_options:
+#                 food_id = option.get('id', '')
+#                 food_name = option.get('name', 'نامشخص')
+#
+#                 desc = f"- {food_name}"
+#                 if option.get('description'):
+#                     desc += f": {option['description']}"
+#                 if option.get('calories'):
+#                     desc += f" (کالری: {option['calories']})"
+#                 if option.get('price'):
+#                     desc += f" (قیمت: {option['price']} تومان)"
+#
+#                 # Add review data if available
+#                 stats = review_db.get_food_stats(food_id)
+#                 if stats['total_reviews'] > 0:
+#                     desc += f" (امتیاز: {stats['average_rating']}/5 از {stats['total_reviews']} نظر)"
+#
+#                     # Add recent reviews
+#                     reviews = review_db.get_food_reviews(food_id)
+#                     if reviews:
+#                         recent_comments = []
+#                         for review in reviews[:3]:  # Last 3 reviews
+#                             if review['comment']:
+#                                 recent_comments.append(f"'{review['comment']}' - {review['user_first_name']}")
+#                         if recent_comments:
+#                             desc += f"\n  نظرات اخیر: {'; '.join(recent_comments)}"
+#
+#                 food_descriptions.append(desc)
+#
+#             # Create comprehensive prompt
+#             prompt = f"""
+# شما یک متخصص تغذیه و مشاور غذایی هستید که باید بهترین گزینه غذایی را از میان گزینه‌های زیر انتخاب کنید:
+#
+# {chr(10).join(food_descriptions)}
+#
+# اطلاعات اضافی از نظرات کاربران قبلی:
+# """
+#
+#             # Add review context
+#             if review_summaries:
+#                 prompt += "\nخلاصه نظرات کاربران:\n"
+#                 for summary in review_summaries[:10]:  # Top 10 reviewed items
+#                     prompt += f"- {summary['food_name']}: امتیاز {summary['average_rating']}/5 ({summary['review_count']} نظر)\n"
+#                     if summary['comments']:
+#                         # Get first few words of comments
+#                         comments_preview = summary['comments'][:200] + "..." if len(summary['comments']) > 200 else summary['comments']
+#                         prompt += f"  نمونه نظرات: {comments_preview}\n"
+#
+#             prompt += """
+#
+# لطفاً با در نظر گیری موارد زیر، بهترین گزینه را توصیه کنید:
+# 1. ارزش غذایی و سلامتی
+# 2. تعادل مواد مغذی
+# 3. کیفیت مواد اولیه (بر اساس نظرات کاربران)
+# 4. رضایت کاربران قبلی
+# 5. مناسب بودن برای وعده غذایی
+# 6. نسبت قیمت به کیفیت
+#
+# پاسخ خود را به صورت مختصر و مفید ارائه دهید، دلیل انتخاب خود را بیان کنید و در صورت وجود، از نظرات کاربران قبلی نیز استفاده کنید.
+# """
+#
+#             # Try models in fallback sequence
+#             for model in self.model_urls:
+#                 logger.info(f"Trying {model['name']}...")
+#                 recommendation = await self._call_gemini_api(model['url'], prompt, model['name'])
+#
+#                 if recommendation and not self._is_error_response(recommendation):
+#                     logger.info(f"Successfully got recommendation from {model['name']}")
+#                     return f"🤖 توصیه از {model['name']}:\n\n{recommendation}"
+#                 else:
+#                     logger.warning(f"{model['name']} failed, trying next model...")
+#
+#             # If all models fail
+#             logger.error("All AI models failed to provide recommendation")
+#             return "متأسفانه تمام مدل‌های هوش مصنوعی در دسترس نیستند. لطفاً بر اساس سلیقه خود انتخاب کنید."
+#
+#         except Exception as e:
+#             logger.error(f"AI recommendation error: {e}")
+#             return "خطا در دریافت توصیه هوش مصنوعی. لطفاً بر اساس سلیقه خود انتخاب کنید."
+#
+#     def _is_error_response(self, response: str) -> bool:
+#         """Check if the response indicates an error"""
+#         error_indicators = [
+#             "خطا", "error", "failed", "متأسفانه", "نمی‌توانم",
+#             "در دسترس نیست", "مشکل", "امکان‌پذیر نیست"
+#         ]
+#         return any(indicator in response.lower() for indicator in error_indicators)
+#
+#     async def _call_gemini_api(self, url: str, prompt: str, model_name: str) -> str:
+#         """Call Gemini API with the given URL and prompt"""
+#         try:
+#             # Modified: Use X-goog-api-key header
+#             headers = {
+#                 'Content-Type': 'application/json',
+#                 'X-goog-api-key': self.api_key, # Use API key in header
+#             }
+#
+#             data = {
+#                 "contents": [{
+#                     "parts": [{
+#                         "text": prompt
+#                     }]
+#                 }],
+#                 "generationConfig": {
+#                     "temperature": 0.7,
+#                     "topK": 40,
+#                     "topP": 0.95,
+#                     "maxOutputTokens": 1024,
+#                 }
+#             }
+#
+#             async with aiohttp.ClientSession() as session:
+#                 # Modified: Remove API key from URL query parameter
+#                 async with session.post(
+#                     url, # URL without ?key=
+#                     headers=headers,
+#                     json=data,
+#                     timeout=aiohttp.ClientTimeout(total=30)
+#                 ) as response:
+#                     if response.status == 200:
+#                         result = await response.json()
+#                         if 'candidates' in result and len(result['candidates']) > 0:
+#                             content = result['candidates'][0]['content']['parts'][0]['text']
+#                             return content
+#                     else:
+#                         logger.error(f"{model_name} API error: {response.status}")
+#                         if response.status == 429:
+#                             logger.warning(f"{model_name} rate limited")
+#                         elif response.status == 403:
+#                             logger.warning(f"{model_name} access forbidden")
+#
+#                     return None
+#
+#         except asyncio.TimeoutError:
+#             logger.error(f"{model_name} API timeout")
+#             return None
+#         except Exception as e:
+#             logger.error(f"{model_name} API call error: {e}")
+#             return None
 
 class EnhancedFoodReservationBot:
     """Enhanced bot class with review system and multi-model AI"""
 
-    def __init__(self, token: str, gemini_api_key: str):
+    def __init__(self, token: str, gemini_api_key: str): # gemini_api_key is still passed but not used by AI_client
         self.token = token
         self.api_client = FoodReservationAPI()
-        self.ai_client = MultiModelGeminiAI(gemini_api_key)
+        # self.ai_client = MultiModelGeminiAI(gemini_api_key) # Commented out AI client initialization
         self.review_db = ReviewDatabase()
         self.user_sessions = {}  # Store user session data
 
@@ -577,7 +576,7 @@ class EnhancedFoodReservationBot:
         keyboard = [
             [InlineKeyboardButton(PERSIAN_TEXT['login'], callback_data='login')],
             [InlineKeyboardButton(PERSIAN_TEXT['view_reservations'], callback_data='view_reservations')],
-            [InlineKeyboardButton(PERSIAN_TEXT['ai_help'], callback_data='ai_help')],
+            [InlineKeyboardButton(PERSIAN_TEXT['ai_help'], callback_data='ai_help')], # Button remains, but handler will give a message
             [InlineKeyboardButton(PERSIAN_TEXT['my_reviews'], callback_data='my_reviews')],
             [InlineKeyboardButton(PERSIAN_TEXT['help'], callback_data='help')]
         ]
@@ -622,7 +621,6 @@ class EnhancedFoodReservationBot:
 • ورود به حساب کاربری
 • مشاهده رزروهای موجود
 • انجام رزرو غذا
-• کمک هوش مصنوعی برای انتخاب غذا (با 4 مدل پشتیبان)
 • ثبت نظر و امتیاز برای غذاها
 • مشاهده نظرات خود
 • لغو رزرو
@@ -630,7 +628,6 @@ class EnhancedFoodReservationBot:
 🔐 برای شروع، ابتدا وارد حساب کاربری خود شوید.
 📱 از دکمه‌های زیر پیام‌ها استفاده کنید.
 ⭐ پس از رزرو، نظر خود را ثبت کنید تا به بهبود توصیه‌ها کمک کنید.
-🤖 سیستم هوش مصنوعی از 4 مدل مختلف برای بهترین توصیه استفاده می‌کند.
 ❓ برای کمک بیشتر از /help استفاده کنید.
         """
         await update.message.reply_text(help_text, reply_markup=self.get_main_keyboard())
@@ -684,7 +681,7 @@ class EnhancedFoodReservationBot:
                 button_text = f"{name} - {date}{rating_info}"
                 keyboard.append([InlineKeyboardButton(button_text, callback_data=f'reserve_{i}')])
 
-            keyboard.append([InlineKeyboardButton(PERSIAN_TEXT['ai_help'], callback_data='ai_help_reservations')])
+            # keyboard.append([InlineKeyboardButton(PERSIAN_TEXT['ai_help'], callback_data='ai_help_reservations')]) # Commented out AI Help button
             keyboard.append([InlineKeyboardButton(PERSIAN_TEXT['back'], callback_data='back')])
 
             context.user_data['reservations'] = reservations
@@ -696,27 +693,11 @@ class EnhancedFoodReservationBot:
             return RESERVATION_SELECTION
 
         elif data == 'ai_help' or data == 'ai_help_reservations':
-            if user_id not in self.user_sessions or not self.user_sessions[user_id].get('logged_in'):
-                await query.edit_message_text(
-                    "ابتدا باید وارد حساب کاربری خود شوید.",
-                    reply_markup=self.get_main_keyboard()
-                )
-                return ConversationHandler.END
-
-            await query.edit_message_text(PERSIAN_TEXT['ai_help_prompt'])
-            reservations = await self.api_client.get_reservations()
-
-            if reservations:
-                recommendation = await self.ai_client.get_food_recommendation(reservations, self.review_db)
-                await query.edit_message_text(
-                    f"{PERSIAN_TEXT['ai_recommendation']}\n\n{recommendation}",
-                    reply_markup=self.get_main_keyboard()
-                )
-            else:
-                await query.edit_message_text(
-                    PERSIAN_TEXT['no_reservations'],
-                    reply_markup=self.get_main_keyboard()
-                )
+            # This handler now just provides a message that AI is disabled
+            await query.edit_message_text(
+                "🤖 کمک هوش مصنوعی در حال حاضر غیرفعال است.",
+                reply_markup=self.get_main_keyboard()
+            )
             return ConversationHandler.END
 
         elif data == 'my_reviews':
@@ -1013,7 +994,7 @@ class EnhancedFoodReservationBot:
                 RESERVATION_SELECTION: [
                     CallbackQueryHandler(self.button_handler)
                 ],
-                AI_HELP: [
+                AI_HELP: [ # This state remains, but its handler is modified
                     CallbackQueryHandler(self.button_handler)
                 ],
                 REVIEW_RATING: [
@@ -1039,22 +1020,24 @@ async def main():
     """Main function to run the bot"""
     # Get configuration from environment variables
     bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
-    gemini_api_key = os.getenv('GEMINI_API_KEY')
+    # gemini_api_key = os.getenv('GEMINI_API_KEY') # Commented out as AI is disabled
 
     if not bot_token:
         logger.error("TELEGRAM_BOT_TOKEN environment variable is required")
         sys.exit(1)
 
-    if not gemini_api_key:
-        logger.error("GEMINI_API_KEY environment variable is required")
-        sys.exit(1)
+    # if not gemini_api_key: # Commented out as AI is disabled
+    #     logger.error("GEMINI_API_KEY environment variable is required")
+    #     sys.exit(1)
 
     # Create and run the bot
-    bot = EnhancedFoodReservationBot(bot_token, gemini_api_key)
+    # Pass a dummy value for gemini_api_key if the __init__ still expects it,
+    # or modify __init__ to make it optional. For now, we'll pass an empty string.
+    bot = EnhancedFoodReservationBot(bot_token, "") # Pass empty string for gemini_api_key
     application = bot.create_application()
 
-    logger.info("Starting Enhanced Food Reservation Bot with Multi-Model AI Fallback...")
-    logger.info("AI Fallback Sequence: Gemini 2.5 Pro → Gemini 2.5 Flash → Gemini 2.0 Flash → Gemini 1.5 Flash")
+    logger.info("Starting Enhanced Food Reservation Bot (AI disabled for debugging)...")
+    # logger.info("AI Fallback Sequence: Gemini 2.5 Pro → Gemini 2.5 Flash → Gemini 2.0 Flash → Gemini 1.5 Flash") # Commented out
 
     try:
         # Explicitly initialize the application
