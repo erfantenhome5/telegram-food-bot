@@ -635,7 +635,7 @@ class EnhancedFoodReservationBot:
         application = (
             Application.builder()
             .token(self.token)
-            .post_shutdown(self.api_client.close_session)  # <-- FIX: Register cleanup hook
+            .post_shutdown(self.api_client.close_session)
             .build()
         )
 
@@ -655,14 +655,13 @@ class EnhancedFoodReservationBot:
                 CommandHandler('cancel', self.cancel),
                 CallbackQueryHandler(self.button_handler, pattern='^back$')
             ],
-            # Allow re-entry into the conversation
             allow_reentry=True
         )
 
         application.add_handler(conv_handler)
         application.add_handler(CommandHandler('help', self.help_command))
-        # A top-level handler for any button press not caught by the conversation
-        application.add_handler(CallbackQueryHandler(self.button_handler))
+        # The following handler is redundant and can interfere with the ConversationHandler.
+        # application.add_handler(CallbackQueryHandler(self.button_handler))
 
         return application
 
