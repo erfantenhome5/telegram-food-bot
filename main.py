@@ -627,7 +627,7 @@ class EnhancedFoodReservationBot:
 
 🔐 برای شروع، ابتدا وارد حساب کاربری خود شوید.
 📱 از دکمه‌های زیر پیام‌ها استفاده کنید.
-⭐ پس از رزرو، نظر خود را ثبت کنید تا به بهبود توصیه‌ها کمک کنید.
+⭐ پس از رزرو, نظر خود را ثبت کنید تا به بهبود توصیه‌ها کمک کنید.
 ❓ برای کمک بیشتر از /help استفاده کنید.
         """
         await update.message.reply_text(help_text, reply_markup=self.get_main_keyboard())
@@ -1022,22 +1022,23 @@ async def main():
     bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
     # gemini_api_key = os.getenv('GEMINI_API_KEY') # Commented out as AI is disabled
 
+    # --- Environment variable checks moved to the very beginning ---
     if not bot_token:
         logger.error("TELEGRAM_BOT_TOKEN environment variable is required")
         sys.exit(1)
 
-    # if not gemini_api_key: # Commented out as AI is disabled
-    #     logger.error("GEMINI_API_KEY environment variable is required")
-    #     sys.exit(1)
+    # If AI is commented out, gemini_api_key is not strictly required for bot's core function.
+    # However, if EnhancedFoodReservationBot.__init__ still expects it, pass a dummy value.
+    # if not gemini_api_key:
+    #     logger.warning("GEMINI_API_KEY environment variable is missing. AI features will be unavailable.")
+    #     gemini_api_key = "" # Ensure it's an empty string if not set
 
     # Create and run the bot
-    # Pass a dummy value for gemini_api_key if the __init__ still expects it,
-    # or modify __init__ to make it optional. For now, we'll pass an empty string.
-    bot = EnhancedFoodReservationBot(bot_token, "") # Pass empty string for gemini_api_key
+    # Pass an empty string for gemini_api_key since AI is disabled
+    bot = EnhancedFoodReservationBot(bot_token, "")
     application = bot.create_application()
 
     logger.info("Starting Enhanced Food Reservation Bot (AI disabled for debugging)...")
-    # logger.info("AI Fallback Sequence: Gemini 2.5 Pro → Gemini 2.5 Flash → Gemini 2.0 Flash → Gemini 1.5 Flash") # Commented out
 
     try:
         # Explicitly initialize the application
@@ -1052,7 +1053,7 @@ async def main():
         # Ensure the application is stopped gracefully before closing the session
         # This check prevents trying to shutdown an application that never fully started or is already stopped
         if application.running: # Check if the application is currently running
-            logger.info("Shutting down Telegram bot application...")
+            logger.info("Shutting down Telegram bot application gracefully...")
             await application.shutdown()
         # Clean up API client session
         await bot.api_client.close_session()
