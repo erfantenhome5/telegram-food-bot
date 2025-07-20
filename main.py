@@ -669,9 +669,8 @@ class EnhancedFoodReservationBot:
 async def main() -> None:
     """
     DEBUGGED: Main function to set up and run the bot.
-    `application.run_polling()` is a coroutine that handles the entire
-    application lifecycle (initialization, polling, shutdown). This avoids 
-    manual lifecycle management and potential event loop conflicts.
+    This version includes explicit signal handling for graceful shutdown,
+    which is crucial for running as a systemd service.
     """
     bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
     if not bot_token:
@@ -681,11 +680,29 @@ async def main() -> None:
     bot = EnhancedFoodReservationBot(bot_token, "")
     application = bot.create_application()
 
-    logger.info("Starting Enhanced Food Reservation Bot (AI disabled for debugging)...")
-    
-    # This will run the bot until a stop signal is received (e.g., Ctrl+C).
-    # It manages the entire application lifecycle, including our cleanup hook.
-    await application.run_polling(allowed_updates=Update.ALL_TYPES)
+    # --- Robust Shutdown Logic ---
+    loop = asyncio.get_running_loop()
+    stop = asyncio.Event()
+    loop.add_signal_handler(signal.SIGINT, stop.set)
+    loop.add_signal_handler(signal.SIGTERM, stop.set)
+
+    # The `async with` context manager ensures `initialize()` and `shutdown()` are called.
+    async with application:
+        # Start all the components of the bot
+        await application.start()
+        await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+        logger.info("Bot started and polling. Waiting for stop signal...")
+
+        # Wait for a stop signal to be received
+        await stop.wait()
+        logger.info("Stop signal received. Shutting down gracefully...")
+
+        # Stop the bot components
+        await application.updater.stop()
+        await application.stop()
+        # `async with` will now call `application.shutdown()` automatically.
+
+    logger.info("Bot has been shut down.")
 
 
 if __name__ == '__main__':
