@@ -1,6 +1,2 @@
-python-telegram-bot
-httpx
-python-dotenv
-telethon
-cryptography
-sentry-sdk
+aiohttp==3.9.5
+python-telegram-bot==21.2
