@@ -11,6 +11,7 @@ import logging
 import asyncio
 import json
 import os
+import signal
 import sys
 import sqlite3
 from datetime import datetime, timedelta
