@@ -500,7 +500,7 @@ class MultiModelGeminiAI:
 
         except Exception as e:
             logger.error(f"AI recommendation error: {e}")
-            return "خطا در دریافت توصیه هوش مصنوعی. لطفاً بر اساس سلیقه خود انتخاب کنید."
+            return "خطا در دریافت توصیه هوش مصنوعی. لطفلاً بر اساس سلیقه خود انتخاب کنید."
 
     def _is_error_response(self, response: str) -> bool:
         """Check if the response indicates an error"""
@@ -1066,9 +1066,10 @@ async def main():
     except Exception as e:
         logger.error(f"Bot error: {e}")
     finally:
-        # Explicitly shutdown the application if it was running
-        # The .updater attribute is set when run_polling starts
-        if application.updater and application.running:
+        # Ensure the application is stopped gracefully before closing the session
+        # This check prevents trying to shutdown an application that never fully started or is already stopped
+        if application.running: # Check if the application is currently running
+            logger.info("Shutting down Telegram bot application...")
             await application.shutdown()
         # Clean up API client session
         await bot.api_client.close_session()
