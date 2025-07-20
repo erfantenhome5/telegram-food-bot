@@ -9,10 +9,11 @@ and leave reviews for food items.
 
 import logging
 import asyncio
+import html
 import json
 import os
 import re
-import signal
+import traceback
 import sys
 import sqlite3
 from datetime import datetime
@@ -25,6 +26,7 @@ from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
 )
+from telegram.constants import ParseMode
 from telegram.error import BadRequest
 from telegram.ext import (
     Application,
@@ -255,7 +257,6 @@ class FoodReservationAPI:
             async with self.session.get(url, headers=headers) as response:
                 if response.status == 200:
                     data = await response.json()
-                    # The actual data is nested inside a complex structure
                     all_days_data = []
                     for day_data in data:
                         for meal in day_data.get("Meals", []):
@@ -284,30 +285,19 @@ class FoodReservationAPI:
         url = f"{self.base_url}/api/v0/Reservation"
         headers = {**self.headers, 'X-XSRF-Token': self.xsrf_token, 'Content-Type': 'application/json;charset=UTF-8'}
         
-        # Construct the complex payload based on HAR file analysis
         payload = [{
-            "Row": reservation_raw_data.get("Row", 0), # This might need adjustment
+            "Row": reservation_raw_data.get("Row", 0),
             "Id": reservation_raw_data.get("Id"),
             "Date": reservation_raw_data.get("Date"),
             "MealId": reservation_raw_data.get("MealId"),
             "FoodId": reservation_raw_data.get("FoodId"),
             "FoodName": reservation_raw_data.get("FoodName"),
             "SelfId": reservation_raw_data.get("SelfId"),
-            "LastCounts": 0,
-            "Counts": 1,
-            "Price": reservation_raw_data.get("Price"),
-            "SobsidPrice": reservation_raw_data.get("Yarane", 0),
-            "PriceType": 2, # Assuming type 2 from HAR
-            "State": 0,
-            "Type": 1,
-            "OP": 1,
-            "OpCategory": 1,
-            "Provider": 1,
-            "Saved": 0,
-            "MealName": reservation_raw_data.get("MealName"),
-            "DayName": reservation_raw_data.get("DayName"),
-            "SelfName": reservation_raw_data.get("SelfName"),
-            "DayIndex": reservation_raw_data.get("DayIndex", 0),
+            "LastCounts": 0, "Counts": 1, "Price": reservation_raw_data.get("Price"),
+            "SobsidPrice": reservation_raw_data.get("Yarane", 0), "PriceType": 2,
+            "State": 0, "Type": 1, "OP": 1, "OpCategory": 1, "Provider": 1, "Saved": 0,
+            "MealName": reservation_raw_data.get("MealName"), "DayName": reservation_raw_data.get("DayName"),
+            "SelfName": reservation_raw_data.get("SelfName"), "DayIndex": reservation_raw_data.get("DayIndex", 0),
             "MealIndex": reservation_raw_data.get("MealIndex", 0),
         }]
         
@@ -315,7 +305,6 @@ class FoodReservationAPI:
             async with self.session.post(url, headers=headers, json=payload) as response:
                 if response.status == 200:
                     result = await response.json()
-                    # Check for success message in the response
                     if result and result[0].get("StateMessage") == "با موفقیت ثبت شد":
                         return True
                 logger.error(f"Reservation failed. Status: {response.status}, Response: {await response.text()}")
@@ -365,7 +354,6 @@ class EnhancedFoodReservationBot:
         user_id = query.from_user.id
         data = query.data
 
-        # Helper to safely edit messages
         async def safe_edit_message(text: str, markup: InlineKeyboardMarkup):
             try:
                 await query.edit_message_text(text=text, reply_markup=markup)
@@ -395,7 +383,8 @@ class EnhancedFoodReservationBot:
                 return ConversationHandler.END
 
             keyboard = []
-            for i, res in enumerate(reservations):
+            # Limit to first 20 reservations to avoid hitting Telegram message limits
+            for i, res in enumerate(reservations[:20]):
                 stats = self.review_db.get_food_stats(res['id'])
                 rating_info = f" ⭐{stats['average_rating']}" if stats['total_reviews'] > 0 else ""
                 button_text = f"{res['name']} - {res['date']}{rating_info}"
@@ -505,6 +494,33 @@ class EnhancedFoodReservationBot:
     async def cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         await update.message.reply_text(PERSIAN_TEXT['welcome'], reply_markup=self.get_main_keyboard())
         return ConversationHandler.END
+    
+    async def error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Log the error and send a telegram message to notify the developer."""
+        logger.error("Exception while handling an update:", exc_info=context.error)
+        
+        # traceback.format_exception returns the usual python message about an exception
+        tb_list = traceback.format_exception(None, context.error, context.error.__traceback__)
+        tb_string = "".join(tb_list)
+
+        # Build the message with some markup and additional information about what happened.
+        update_str = update.to_dict() if isinstance(update, Update) else str(update)
+        message = (
+            f"An exception was raised while handling an update\n"
+            f"<pre>update = {html.escape(json.dumps(update_str, indent=2, ensure_ascii=False))}"
+            "</pre>\n\n"
+            f"<pre>context.chat_data = {html.escape(str(context.chat_data))}</pre>\n\n"
+            f"<pre>context.user_data = {html.escape(str(context.user_data))}</pre>\n\n"
+            f"<pre>{html.escape(tb_string)}</pre>"
+        )
+
+        # This is a placeholder for your developer chat id
+        DEVELOPER_CHAT_ID = os.getenv("DEVELOPER_CHAT_ID")
+        if DEVELOPER_CHAT_ID:
+            # Finally, send the message
+            await context.bot.send_message(
+                chat_id=DEVELOPER_CHAT_ID, text=message, parse_mode=ParseMode.HTML
+            )
 
     def create_application(self) -> Application:
         application = (
@@ -527,9 +543,16 @@ class EnhancedFoodReservationBot:
         )
         application.add_handler(conv_handler)
         application.add_handler(CommandHandler('help', self.help_command))
+        # Add the error handler
+        application.add_error_handler(self.error_handler)
         return application
 
-async def main() -> None:
+def main() -> None:
+    """
+    Run the bot. This function is now the main entry point and uses the
+    application's built-in run_polling method, which correctly handles
+    the asyncio event loop and shutdown signals.
+    """
     bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
     if not bot_token:
         logger.critical("FATAL: TELEGRAM_BOT_TOKEN environment variable is not set.")
@@ -539,10 +562,10 @@ async def main() -> None:
     application = bot.create_application()
 
     logger.info("Starting bot...")
-    await application.run_polling(allowed_updates=Update.ALL_TYPES)
+    # This will run the bot until a stop signal is received (e.g., Ctrl+C or SIGTERM)
+    # It manages the entire application lifecycle gracefully.
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
+
 
 if __name__ == '__main__':
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("Bot shutdown requested.")
+    main()
